@@ -5,44 +5,95 @@
             "parameters": {
                 "httpMethod": "POST",
                 "path": "file-ingestion",
-                "responseMode": "lastNode",
+                "responseMode": "responseNode",
                 "options": {}
             },
+            "id": "ingest-webhook",
             "name": "Webhook — File Ingestion",
             "type": "n8n-nodes-base.webhook",
             "typeVersion": 2,
             "position": [
-                250,
-                300
+                220,
+                340
+            ],
+            "webhookId": "file-ingestion"
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Validate ingestion request ──\nconst body = $input.first().json.body;\n\nconst document_id = body.document_id;\nconst store_id = body.store_id;\n\nif (!document_id) throw new Error('Missing required field: document_id');\nif (!store_id) throw new Error('Missing required field: store_id');\n\nreturn [{ json: { document_id, store_id } }];"
+            },
+            "id": "ingest-validate",
+            "name": "Validate Ingestion Request",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                340
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE knowledge_documents SET status = 'extracting' WHERE id = '{{ $json.body.document_id }}' RETURNING id, store_id, file_name, file_type, storage_path, doc_type;",
+                "query": "=UPDATE knowledge_documents SET status = 'extracting', progress = 10 WHERE id = '{{ $json.document_id }}' AND store_id = '{{ $json.store_id }}' RETURNING id, store_id, file_name, file_type, storage_path, doc_type;",
                 "options": {}
             },
-            "name": "Update Status — Extracting",
+            "id": "update-extracting",
+            "name": "Update Status → Extracting",
             "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2,
+            "typeVersion": 2.5,
             "position": [
-                470,
-                300
+                660,
+                340
             ],
             "credentials": {
                 "postgres": {
-                    "id": "SUPABASE_DB_CREDENTIAL_ID",
-                    "name": "Supabase DB"
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
                 }
             }
         },
         {
             "parameters": {
+                "respondWith": "json",
+                "responseBody": "={ \"status\": \"processing\", \"document_id\": \"{{ $json.id }}\" }",
+                "options": {
+                    "responseCode": 202,
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "early-respond",
+            "name": "Respond 202 — Accepted",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                660,
+                560
+            ]
+        },
+        {
+            "parameters": {
                 "method": "GET",
-                "url": "={{ $env.SUPABASE_URL }}/storage/v1/object/authenticated/documents/{{ $json.storage_path }}",
+                "url": "={{ $env.SUPABASE_URL || 'https://YOUR_PROJECT.supabase.co' }}/storage/v1/object/authenticated/documents/{{ $json.storage_path }}",
                 "authentication": "genericCredentialType",
                 "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "apikey",
+                            "value": "={{ $env.SUPABASE_SERVICE_KEY || 'YOUR_SUPABASE_SERVICE_ROLE_KEY' }}"
+                        }
+                    ]
+                },
                 "options": {
+                    "timeout": 30000,
                     "response": {
                         "response": {
                             "responseFormat": "file"
@@ -50,42 +101,83 @@
                     }
                 }
             },
+            "id": "download-file",
             "name": "Download File from Storage",
             "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4,
+            "typeVersion": 4.2,
             "position": [
-                690,
-                300
+                880,
+                340
             ],
             "credentials": {
                 "httpHeaderAuth": {
-                    "id": "SUPABASE_SERVICE_KEY_CREDENTIAL",
-                    "name": "Supabase Service Key"
+                    "id": "YOUR_SUPABASE_SERVICE_CREDENTIAL_ID",
+                    "name": "Supabase Service Role"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 3,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Extract text content from file ──\nconst docMeta = $('Update Status → Extracting').item.json;\nconst fileType = (docMeta.file_type || '').toLowerCase();\nconst binary = $input.first().binary;\n\nlet extractedText = '';\n\n// For text-based files, read the binary directly\nif (['txt', 'csv', 'md'].includes(fileType)) {\n  const binaryData = binary?.data;\n  if (binaryData) {\n    extractedText = Buffer.from(binaryData.data || binaryData, 'base64').toString('utf-8');\n  }\n} else if (fileType === 'pdf') {\n  // For PDF: Use a PDF extraction service or library\n  // Option 1: Use pdf-parse via n8n code node\n  // Option 2: Call an external extraction API\n  // Placeholder — integrate your preferred PDF parser:\n  extractedText = '[PDF_EXTRACTION_PLACEHOLDER: Integrate pdf-parse or external service]';\n} else if (['doc', 'docx'].includes(fileType)) {\n  extractedText = '[DOCX_EXTRACTION_PLACEHOLDER: Integrate mammoth.js or external service]';\n} else if (['xls', 'xlsx'].includes(fileType)) {\n  extractedText = '[EXCEL_EXTRACTION_PLACEHOLDER: Integrate SheetJS or external service]';\n}\n\nif (!extractedText || extractedText.trim().length < 10) {\n  throw new Error(`Failed to extract text from ${fileType} file: ${docMeta.file_name}`);\n}\n\nreturn [{\n  json: {\n    text: extractedText,\n    document_id: docMeta.id,\n    store_id: docMeta.store_id,\n    file_name: docMeta.file_name,\n    file_type: fileType,\n    doc_type: docMeta.doc_type || 'general',\n    char_count: extractedText.length\n  }\n}];"
+            },
+            "id": "extract-text",
+            "name": "Extract Text Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "=UPDATE knowledge_documents SET status = 'chunking', progress = 30 WHERE id = '{{ $json.document_id }}';",
+                "options": {}
+            },
+            "id": "update-chunking",
+            "name": "Update Status → Chunking",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1320,
+                340
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
                 }
             }
         },
         {
             "parameters": {
-                "jsCode": "// Extract text from file (simplified — use dedicated extractors per type)\nconst binaryData = $input.first().binary;\nconst fileType = $('Update Status — Extracting').first().json.file_type;\nlet text = '';\n\n// For TXT and CSV, read binary directly\nif (['txt', 'csv'].includes(fileType)) {\n  text = Buffer.from(binaryData.data.data, 'base64').toString('utf-8');\n} else {\n  // For PDF/DOCX, integrate a dedicated extraction service\n  text = '[EXTRACTION_NEEDED: Use a PDF/DOCX parsing service]';\n}\n\nreturn [{ json: { text, document_id: $('Update Status — Extracting').first().json.id, store_id: $('Update Status — Extracting').first().json.store_id, doc_type: $('Update Status — Extracting').first().json.doc_type || 'general' } }];"
+                "jsCode": "// ── Chunk text with overlap ──\nconst text = $('Extract Text Content').item.json.text;\nconst document_id = $('Extract Text Content').item.json.document_id;\nconst store_id = $('Extract Text Content').item.json.store_id;\nconst doc_type = $('Extract Text Content').item.json.doc_type;\n\nconst CHUNK_SIZE = 500;   // characters per chunk\nconst CHUNK_OVERLAP = 100; // overlap between chunks\n\nconst chunks = [];\nlet start = 0;\nlet chunkIndex = 0;\n\nwhile (start < text.length) {\n  // Try to break at sentence/paragraph boundaries\n  let end = Math.min(start + CHUNK_SIZE, text.length);\n  \n  // Look for a sentence break near the end\n  if (end < text.length) {\n    const lastPeriod = text.lastIndexOf('.', end);\n    const lastNewline = text.lastIndexOf('\\n', end);\n    const breakPoint = Math.max(lastPeriod, lastNewline);\n    if (breakPoint > start + CHUNK_SIZE * 0.5) {\n      end = breakPoint + 1;\n    }\n  }\n  \n  const chunkContent = text.slice(start, end).trim();\n  \n  if (chunkContent.length > 20) { // Skip tiny fragments\n    chunks.push({\n      json: {\n        content: chunkContent,\n        chunk_index: chunkIndex,\n        document_id,\n        store_id,\n        doc_type,\n        metadata: JSON.stringify({\n          doc_type,\n          chunk_index: chunkIndex,\n          source: $('Extract Text Content').item.json.file_name\n        })\n      }\n    });\n    chunkIndex++;\n  }\n  \n  start = end - CHUNK_OVERLAP;\n  if (start >= text.length) break;\n}\n\nreturn chunks;"
             },
-            "name": "Extract Text",
+            "id": "chunk-text",
+            "name": "Chunk Text with Overlap",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                910,
-                300
+                1540,
+                340
             ]
         },
         {
             "parameters": {
-                "jsCode": "// Chunk text with overlap\nconst text = $json.text;\nconst CHUNK_SIZE = 400;\nconst OVERLAP = 80;\nconst chunks = [];\n\nlet start = 0;\nlet index = 0;\nwhile (start < text.length) {\n  const end = Math.min(start + CHUNK_SIZE, text.length);\n  chunks.push({\n    content: text.slice(start, end),\n    chunk_index: index,\n    document_id: $json.document_id,\n    store_id: $json.store_id,\n    metadata: { doc_type: $json.doc_type, chunk_index: index }\n  });\n  index++;\n  start = end - OVERLAP;\n  if (start >= text.length) break;\n}\n\nreturn chunks.map(c => ({ json: c }));"
+                "batchSize": 20,
+                "options": {}
             },
-            "name": "Chunk Text",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
+            "id": "split-batches",
+            "name": "Split Into Batches",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
             "position": [
-                1130,
-                300
+                1760,
+                340
             ]
         },
         {
@@ -94,80 +186,101 @@
                 "url": "https://api.openai.com/v1/embeddings",
                 "authentication": "genericCredentialType",
                 "genericAuthType": "httpHeaderAuth",
-                "sendBody": true,
-                "bodyParameters": {
+                "sendHeaders": true,
+                "headerParameters": {
                     "parameters": [
                         {
-                            "name": "model",
-                            "value": "text-embedding-3-small"
-                        },
-                        {
-                            "name": "input",
-                            "value": "={{ $json.content }}"
+                            "name": "Content-Type",
+                            "value": "application/json"
                         }
                     ]
                 },
-                "options": {},
-                "batching": {
-                    "batch": {
-                        "batchSize": 20,
-                        "batchInterval": 1000
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": {{ JSON.stringify($json.content) }}\n}",
+                "options": {
+                    "timeout": 30000,
+                    "batching": {
+                        "batch": {
+                            "batchSize": 1,
+                            "batchInterval": 200
+                        }
                     }
                 }
             },
-            "name": "Generate Embeddings",
+            "id": "embed-chunks",
+            "name": "Generate Embeddings — OpenAI",
             "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4,
+            "typeVersion": 4.2,
             "position": [
-                1350,
-                300
+                1980,
+                340
             ],
             "credentials": {
                 "httpHeaderAuth": {
-                    "id": "OPENAI_CREDENTIAL_ID",
+                    "id": "YOUR_OPENAI_CREDENTIAL_ID",
                     "name": "OpenAI API Key"
                 }
-            }
+            },
+            "retryOnFail": true,
+            "maxTries": 3,
+            "waitBetweenTries": 2000
         },
         {
             "parameters": {
-                "operation": "insert",
-                "schema": "public",
-                "table": "knowledge_chunks",
-                "columns": "store_id,document_id,chunk_index,content,embedding,metadata,embedding_status",
-                "options": {}
+                "jsCode": "// ── Merge chunk data with its embedding ──\nconst chunkData = $('Split Into Batches').item.json;\nconst embeddingResponse = $input.first().json;\n\nconst embedding = embeddingResponse.data[0].embedding;\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nreturn [{\n  json: {\n    store_id: chunkData.store_id,\n    document_id: chunkData.document_id,\n    chunk_index: chunkData.chunk_index,\n    content: chunkData.content,\n    embedding: embeddingStr,\n    metadata: chunkData.metadata,\n    doc_type: chunkData.doc_type,\n    embedding_status: 'complete'\n  }\n}];"
             },
-            "name": "Store Chunks in DB",
-            "type": "n8n-nodes-base.postgres",
+            "id": "merge-embedding",
+            "name": "Merge Chunk + Embedding",
+            "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1570,
-                300
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "SUPABASE_DB_CREDENTIAL_ID",
-                    "name": "Supabase DB"
-                }
-            }
+                2200,
+                340
+            ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE knowledge_documents SET status = 'complete', chunk_count = (SELECT COUNT(*) FROM knowledge_chunks WHERE document_id = '{{ $json.document_id }}'), progress = 100 WHERE id = '{{ $json.document_id }}';",
+                "query": "=INSERT INTO knowledge_chunks (store_id, document_id, chunk_index, content, embedding, metadata, embedding_status) VALUES ('{{ $json.store_id }}', '{{ $json.document_id }}', {{ $json.chunk_index }}, {{ $json.content | toJSON }}, '{{ $json.embedding }}'::vector, '{{ $json.metadata }}'::jsonb, 'complete');",
                 "options": {}
             },
-            "name": "Update Status — Complete",
+            "id": "insert-chunk",
+            "name": "Insert Chunk to DB",
             "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2,
+            "typeVersion": 2.5,
             "position": [
-                1790,
-                300
+                2420,
+                340
             ],
             "credentials": {
                 "postgres": {
-                    "id": "SUPABASE_DB_CREDENTIAL_ID",
-                    "name": "Supabase DB"
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 1000
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "=UPDATE knowledge_documents SET status = 'complete', progress = 100, chunk_count = (SELECT COUNT(*) FROM knowledge_chunks WHERE document_id = '{{ $('Validate Ingestion Request').item.json.document_id }}') WHERE id = '{{ $('Validate Ingestion Request').item.json.document_id }}';",
+                "options": {}
+            },
+            "id": "update-complete",
+            "name": "Update Status → Complete",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                2640,
+                340
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
                 }
             }
         }
@@ -177,14 +290,30 @@
             "main": [
                 [
                     {
-                        "node": "Update Status — Extracting",
+                        "node": "Validate Ingestion Request",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Update Status — Extracting": {
+        "Validate Ingestion Request": {
+            "main": [
+                [
+                    {
+                        "node": "Update Status → Extracting",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Respond 202 — Accepted",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Status → Extracting": {
             "main": [
                 [
                     {
@@ -199,51 +328,91 @@
             "main": [
                 [
                     {
-                        "node": "Extract Text",
+                        "node": "Extract Text Content",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Extract Text": {
+        "Extract Text Content": {
             "main": [
                 [
                     {
-                        "node": "Chunk Text",
+                        "node": "Update Status → Chunking",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Chunk Text": {
+        "Update Status → Chunking": {
             "main": [
                 [
                     {
-                        "node": "Generate Embeddings",
+                        "node": "Chunk Text with Overlap",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Generate Embeddings": {
+        "Chunk Text with Overlap": {
             "main": [
                 [
                     {
-                        "node": "Store Chunks in DB",
+                        "node": "Split Into Batches",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Store Chunks in DB": {
+        "Split Into Batches": {
             "main": [
                 [
                     {
-                        "node": "Update Status — Complete",
+                        "node": "Generate Embeddings — OpenAI",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Update Status → Complete",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Generate Embeddings — OpenAI": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Chunk + Embedding",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge Chunk + Embedding": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Chunk to DB",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Chunk to DB": {
+            "main": [
+                [
+                    {
+                        "node": "Split Into Batches",
                         "type": "main",
                         "index": 0
                     }
@@ -252,6 +421,19 @@
         }
     },
     "settings": {
-        "executionOrder": "v1"
-    }
+        "executionOrder": "v1",
+        "saveManualExecutions": true,
+        "callerPolicy": "workflowsFromSameOwner"
+    },
+    "tags": [
+        {
+            "name": "ShopMind AI"
+        },
+        {
+            "name": "Ingestion"
+        },
+        {
+            "name": "RAG"
+        }
+    ]
 }

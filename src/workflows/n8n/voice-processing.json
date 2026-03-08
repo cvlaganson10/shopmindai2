@@ -1,0 +1,479 @@
+{
+    "name": "ShopMind AI — Voice Processing Pipeline",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "voice-processing",
+                "responseMode": "responseNode",
+                "options": {
+                    "rawBody": true
+                }
+            },
+            "id": "voice-webhook",
+            "name": "Webhook — Voice Processing",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                220,
+                340
+            ],
+            "webhookId": "voice-processing"
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Extract FormData fields ──\nconst body = $input.first().json.body;\nconst binary = $input.first().binary;\n\nconst store_id = body.store_id;\nconst session_id = body.session_id;\nconst conversation_id = body.conversation_id || null;\n\nif (!store_id) throw new Error('Missing required field: store_id');\n\n// The audio binary should be in the 'audio' field from FormData\nif (!binary || !binary.audio) {\n  throw new Error('Missing audio data in request');\n}\n\nreturn [{\n  json: {\n    store_id,\n    session_id,\n    conversation_id\n  },\n  binary: {\n    audio: binary.audio\n  }\n}];"
+            },
+            "id": "voice-validate",
+            "name": "Validate Voice Input",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.openai.com/v1/audio/transcriptions",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "contentType": "multipart-form-data",
+                "sendBody": true,
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "model",
+                            "value": "whisper-1"
+                        },
+                        {
+                            "name": "language",
+                            "value": "en"
+                        },
+                        {
+                            "name": "response_format",
+                            "value": "verbose_json"
+                        }
+                    ]
+                },
+                "sendBinaryData": true,
+                "binaryPropertyName": "audio",
+                "options": {
+                    "timeout": 30000,
+                    "response": {
+                        "response": {
+                            "responseFormat": "json"
+                        }
+                    }
+                }
+            },
+            "id": "stt-whisper",
+            "name": "STT — Whisper",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                660,
+                340
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_OPENAI_CREDENTIAL_ID",
+                    "name": "OpenAI API Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Extract transcript and check confidence ──\nconst sttResult = $input.first().json;\nconst transcript = (sttResult.text || '').trim();\nconst language = sttResult.language || 'en';\n\nif (!transcript) {\n  throw new Error('Could not transcribe audio — no speech detected');\n}\n\nreturn [{\n  json: {\n    transcript,\n    language,\n    store_id: $('Validate Voice Input').item.json.store_id,\n    session_id: $('Validate Voice Input').item.json.session_id,\n    conversation_id: $('Validate Voice Input').item.json.conversation_id\n  }\n}];"
+            },
+            "id": "extract-transcript",
+            "name": "Extract Transcript",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                880,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.openai.com/v1/embeddings",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{ $json.transcript }}\"\n}",
+                "options": {
+                    "timeout": 30000
+                }
+            },
+            "id": "voice-embed",
+            "name": "Embed Transcript — OpenAI",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1100,
+                340
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_OPENAI_CREDENTIAL_ID",
+                    "name": "OpenAI API Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Build RAG query for voice transcript ──\nconst embedding = $('Embed Transcript — OpenAI').item.json.data[0].embedding;\nconst store_id = $('Extract Transcript').item.json.store_id;\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > 0.65 ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT 5;`,\n    store_id\n  }\n}];"
+            },
+            "id": "voice-rag-query",
+            "name": "Build Voice RAG Query",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "={{ $json.query }}",
+                "options": {}
+            },
+            "id": "voice-vector-search",
+            "name": "Voice RAG Search",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                1540,
+                340
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Assemble context for voice AI ──\nconst transcript = $('Extract Transcript').item.json.transcript;\nconst store_id = $('Extract Transcript').item.json.store_id;\nconst chunks = $('Voice RAG Search').all().map(i => i.json);\n\nlet ragContext = chunks.length > 0\n  ? chunks.map((c, i) => `[Source ${i + 1}]: ${c.content}`).join('\\n\\n')\n  : '[NO CONTEXT FOUND]';\n\nconst systemPrompt = `You are a friendly AI shopping assistant. Answer the customer's spoken question using ONLY the context below. Keep your answer short (2-3 sentences) — this will be spoken aloud.\n\nRETRIEVED CONTEXT:\n${ragContext}\n\nRULES:\n- Keep answers brief and natural for voice output\n- If context doesn't have the answer, say \"I'm not sure about that, but the store team can help you with that.\"\n- Do NOT invent product details`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    transcript,\n    store_id\n  }\n}];"
+            },
+            "id": "voice-context",
+            "name": "Assemble Voice Context",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.openai.com/v1/chat/completions",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.systemPrompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.transcript) }} }\n  ],\n  \"temperature\": 0.4,\n  \"max_tokens\": 200\n}",
+                "options": {
+                    "timeout": 60000
+                }
+            },
+            "id": "voice-gpt",
+            "name": "GPT — Voice Response",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1980,
+                340
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_OPENAI_CREDENTIAL_ID",
+                    "name": "OpenAI API Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 3000
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Extract GPT text response ──\nconst gptResponse = $input.first().json;\nlet aiText = '';\ntry {\n  aiText = gptResponse.choices[0].message.content;\n} catch(e) {\n  aiText = 'Sorry, I had trouble understanding. Could you try saying that again?';\n}\n\nreturn [{\n  json: {\n    ai_response: aiText,\n    transcript: $('Extract Transcript').item.json.transcript,\n    store_id: $('Extract Transcript').item.json.store_id,\n    session_id: $('Extract Transcript').item.json.session_id,\n    conversation_id: $('Extract Transcript').item.json.conversation_id\n  }\n}];"
+            },
+            "id": "parse-voice-response",
+            "name": "Parse Voice Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        },
+                        {
+                            "name": "Accept",
+                            "value": "audio/mpeg"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"text\": {{ JSON.stringify($json.ai_response) }},\n  \"model_id\": \"eleven_turbo_v2_5\",\n  \"voice_settings\": {\n    \"stability\": 0.5,\n    \"similarity_boost\": 0.75,\n    \"style\": 0.0,\n    \"use_speaker_boost\": true\n  }\n}",
+                "options": {
+                    "timeout": 30000,
+                    "response": {
+                        "response": {
+                            "responseFormat": "file"
+                        }
+                    }
+                }
+            },
+            "id": "tts-elevenlabs",
+            "name": "TTS — ElevenLabs",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2420,
+                340
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_ELEVENLABS_CREDENTIAL_ID",
+                    "name": "ElevenLabs API Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Upload TTS audio to Supabase Storage and get public URL ──\nconst binary = $input.first().binary;\nconst voiceData = $('Parse Voice Response').item.json;\n\n// We'll pass through data + binary for the response\nreturn [{\n  json: {\n    transcript: voiceData.transcript,\n    ai_response: voiceData.ai_response,\n    conversation_id: voiceData.conversation_id || require('crypto').randomUUID(),\n    confidence: 0.95,\n    has_audio: !!binary\n  },\n  binary: binary\n}];"
+            },
+            "id": "prepare-response",
+            "name": "Prepare Voice Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={\n  \"transcript\": {{ JSON.stringify($json.transcript) }},\n  \"ai_response\": {{ JSON.stringify($json.ai_response) }},\n  \"conversation_id\": \"{{ $json.conversation_id }}\",\n  \"confidence\": {{ $json.confidence }},\n  \"audio_url\": null\n}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "voice-respond",
+            "name": "Respond — Voice",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                2860,
+                340
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook — Voice Processing": {
+            "main": [
+                [
+                    {
+                        "node": "Validate Voice Input",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate Voice Input": {
+            "main": [
+                [
+                    {
+                        "node": "STT — Whisper",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "STT — Whisper": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Transcript",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Transcript": {
+            "main": [
+                [
+                    {
+                        "node": "Embed Transcript — OpenAI",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Embed Transcript — OpenAI": {
+            "main": [
+                [
+                    {
+                        "node": "Build Voice RAG Query",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Voice RAG Query": {
+            "main": [
+                [
+                    {
+                        "node": "Voice RAG Search",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Voice RAG Search": {
+            "main": [
+                [
+                    {
+                        "node": "Assemble Voice Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Assemble Voice Context": {
+            "main": [
+                [
+                    {
+                        "node": "GPT — Voice Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "GPT — Voice Response": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Voice Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Voice Response": {
+            "main": [
+                [
+                    {
+                        "node": "TTS — ElevenLabs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "TTS — ElevenLabs": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare Voice Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare Voice Response": {
+            "main": [
+                [
+                    {
+                        "node": "Respond — Voice",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1",
+        "saveManualExecutions": true,
+        "callerPolicy": "workflowsFromSameOwner"
+    },
+    "tags": [
+        {
+            "name": "ShopMind AI"
+        },
+        {
+            "name": "Voice"
+        },
+        {
+            "name": "STT/TTS"
+        }
+    ]
+}

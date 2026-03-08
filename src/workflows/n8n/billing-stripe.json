@@ -1,0 +1,450 @@
+{
+    "name": "ShopMind AI — Billing & Stripe Pipeline",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "billing",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "id": "billing-webhook",
+            "name": "Webhook — Billing",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                220,
+                340
+            ],
+            "webhookId": "billing"
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Validate billing request ──\nconst body = $input.first().json.body;\nconst action = body.action;\nconst store_id = body.store_id;\n\nif (!action) throw new Error('Missing required field: action');\nif (!store_id) throw new Error('Missing required field: store_id');\n\nconst validActions = ['create_checkout', 'create_portal'];\nif (!validActions.includes(action)) {\n  throw new Error(`Invalid action: ${action}. Must be one of: ${validActions.join(', ')}`);\n}\n\nreturn [{ json: { ...body, action, store_id } }];"
+            },
+            "id": "billing-validate",
+            "name": "Validate Billing Request",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "rules": {
+                    "values": [
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.action }}",
+                                        "rightValue": "create_checkout",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "renameOutput": "Checkout"
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.action }}",
+                                        "rightValue": "create_portal",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "renameOutput": "Portal"
+                        }
+                    ]
+                },
+                "options": {
+                    "fallbackOutput": "extra"
+                }
+            },
+            "id": "billing-switch",
+            "name": "Route by Action",
+            "type": "n8n-nodes-base.switch",
+            "typeVersion": 3.2,
+            "position": [
+                660,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "=SELECT sp.stripe_price_id_monthly, sp.stripe_price_id_yearly FROM subscription_plans sp WHERE sp.id = '{{ $json.plan_id }}' AND sp.is_active = true LIMIT 1;",
+                "options": {}
+            },
+            "id": "fetch-plan",
+            "name": "Fetch Plan Price IDs",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                880,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Build Stripe checkout session request ──\nconst input = $('Validate Billing Request').item.json;\nconst plan = $input.first().json;\n\nconst period = input.period || 'monthly';\nconst priceId = period === 'yearly' \n  ? plan.stripe_price_id_yearly \n  : plan.stripe_price_id_monthly;\n\nif (!priceId) {\n  throw new Error(`No Stripe price ID found for plan ${input.plan_id} (${period})`);\n}\n\nreturn [{\n  json: {\n    price_id: priceId,\n    store_id: input.store_id,\n    success_url: input.success_url || 'https://yourapp.com/dashboard?checkout=success',\n    cancel_url: input.cancel_url || 'https://yourapp.com/dashboard/billing?checkout=canceled'\n  }\n}];"
+            },
+            "id": "build-checkout",
+            "name": "Build Checkout Params",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.stripe.com/v1/checkout/sessions",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "mode",
+                            "value": "subscription"
+                        },
+                        {
+                            "name": "line_items[0][price]",
+                            "value": "={{ $json.price_id }}"
+                        },
+                        {
+                            "name": "line_items[0][quantity]",
+                            "value": "1"
+                        },
+                        {
+                            "name": "success_url",
+                            "value": "={{ $json.success_url }}"
+                        },
+                        {
+                            "name": "cancel_url",
+                            "value": "={{ $json.cancel_url }}"
+                        },
+                        {
+                            "name": "metadata[store_id]",
+                            "value": "={{ $json.store_id }}"
+                        },
+                        {
+                            "name": "allow_promotion_codes",
+                            "value": "true"
+                        }
+                    ]
+                },
+                "options": {
+                    "timeout": 15000,
+                    "response": {
+                        "response": {
+                            "responseFormat": "json"
+                        }
+                    }
+                }
+            },
+            "id": "stripe-checkout",
+            "name": "Stripe — Create Checkout Session",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1320,
+                200
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_STRIPE_SECRET_CREDENTIAL_ID",
+                    "name": "Stripe Secret Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={\n  \"checkout_url\": \"{{ $json.url }}\"\n}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "respond-checkout",
+            "name": "Respond — Checkout URL",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1540,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "=SELECT s.stripe_customer_id FROM subscriptions s WHERE s.store_id = '{{ $json.store_id }}' AND s.status IN ('active', 'trialing', 'past_due') ORDER BY s.created_at DESC LIMIT 1;",
+                "options": {}
+            },
+            "id": "fetch-customer",
+            "name": "Fetch Stripe Customer ID",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                880,
+                480
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.stripe.com/v1/billing_portal/sessions",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "customer",
+                            "value": "={{ $json.stripe_customer_id }}"
+                        },
+                        {
+                            "name": "return_url",
+                            "value": "={{ $('Validate Billing Request').item.json.return_url || 'https://yourapp.com/dashboard/billing' }}"
+                        }
+                    ]
+                },
+                "options": {
+                    "timeout": 15000,
+                    "response": {
+                        "response": {
+                            "responseFormat": "json"
+                        }
+                    }
+                }
+            },
+            "id": "stripe-portal",
+            "name": "Stripe — Create Portal Session",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1100,
+                480
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_STRIPE_SECRET_CREDENTIAL_ID",
+                    "name": "Stripe Secret Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={\n  \"portal_url\": \"{{ $json.url }}\"\n}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Access-Control-Allow-Origin",
+                                "value": "*"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "respond-portal",
+            "name": "Respond — Portal URL",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1320,
+                480
+            ]
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={ \"error\": \"Unknown action\" }",
+                "options": {
+                    "responseCode": 400
+                }
+            },
+            "id": "respond-error",
+            "name": "Respond — Error",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                880,
+                660
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook — Billing": {
+            "main": [
+                [
+                    {
+                        "node": "Validate Billing Request",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate Billing Request": {
+            "main": [
+                [
+                    {
+                        "node": "Route by Action",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Route by Action": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Plan Price IDs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Fetch Stripe Customer ID",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Respond — Error",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Plan Price IDs": {
+            "main": [
+                [
+                    {
+                        "node": "Build Checkout Params",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Checkout Params": {
+            "main": [
+                [
+                    {
+                        "node": "Stripe — Create Checkout Session",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Stripe — Create Checkout Session": {
+            "main": [
+                [
+                    {
+                        "node": "Respond — Checkout URL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Stripe Customer ID": {
+            "main": [
+                [
+                    {
+                        "node": "Stripe — Create Portal Session",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Stripe — Create Portal Session": {
+            "main": [
+                [
+                    {
+                        "node": "Respond — Portal URL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1",
+        "saveManualExecutions": true,
+        "callerPolicy": "workflowsFromSameOwner"
+    },
+    "tags": [
+        {
+            "name": "ShopMind AI"
+        },
+        {
+            "name": "Billing"
+        },
+        {
+            "name": "Stripe"
+        }
+    ]
+}

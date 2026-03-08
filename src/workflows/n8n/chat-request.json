@@ -6,21 +6,78 @@
         "httpMethod": "POST",
         "path": "chat-request",
         "responseMode": "responseNode",
-        "options": {}
+        "options": {
+          "rawBody": true
+        }
       },
+      "id": "webhook-trigger",
       "name": "Webhook — Chat Request",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [250, 300]
+      "position": [
+        220,
+        340
+      ],
+      "webhookId": "chat-request"
     },
     {
       "parameters": {
-        "jsCode": "// Sanitize and validate input\nconst input = $input.first().json.body;\nconst store_id = input.store_id;\nconst session_id = input.session_id;\nconst message = (input.message || '').trim().slice(0, 2000);\nconst conversation_id = input.conversation_id || null;\nconst conversation_history = input.conversation_history || [];\n\nif (!store_id || !message) {\n  throw new Error('Missing required fields: store_id, message');\n}\n\nreturn [{ json: { store_id, session_id, message, conversation_id, conversation_history } }];"
+        "jsCode": "// ── Validate & Sanitize Input ──\nconst body = $input.first().json.body;\n\nconst store_id = body.store_id;\nconst session_id = body.session_id;\nconst message = (body.message || '').trim().slice(0, 2000);\nconst conversation_id = body.conversation_id || null;\nconst conversation_history = body.conversation_history || [];\n\nif (!store_id) throw new Error('Missing required field: store_id');\nif (!message) throw new Error('Missing required field: message');\n\n// Prompt injection defense\nconst injectionPatterns = [\n  'ignore previous instructions',\n  'ignore all instructions',\n  'disregard your instructions',\n  'system prompt',\n  'you are now',\n  'jailbreak',\n  'DAN mode'\n];\n\nlet safeMessage = message;\ninjectionPatterns.forEach(pattern => {\n  safeMessage = safeMessage.replace(new RegExp(pattern, 'gi'), '[removed]');\n});\n\nreturn [{\n  json: {\n    store_id,\n    session_id,\n    message: safeMessage,\n    conversation_id,\n    conversation_history\n  }\n}];"
       },
-      "name": "Validate Input",
+      "id": "validate-input",
+      "name": "Validate & Sanitize Input",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [470, 300]
+      "position": [
+        440,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, store_name, agent_name, brand_tone, escalation_email FROM store_profiles WHERE id = '{{ $json.store_id }}' AND is_active = true LIMIT 1;",
+        "options": {}
+      },
+      "id": "fetch-store",
+      "name": "Fetch Store Profile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        660,
+        340
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+          "name": "Supabase PostgreSQL"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT agent_name, brand_voice, custom_greeting, fallback_message, escalation_info, upsell_enabled, top_k_retrieval, similarity_threshold FROM ai_configurations WHERE store_id = '{{ $json.store_id }}' LIMIT 1;",
+        "options": {}
+      },
+      "id": "fetch-ai-config",
+      "name": "Fetch AI Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        340
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+          "name": "Supabase PostgreSQL"
+        }
+      }
     },
     {
       "parameters": {
@@ -28,105 +85,337 @@
         "url": "https://api.openai.com/v1/embeddings",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "bodyParameters": {
+        "sendHeaders": true,
+        "headerParameters": {
           "parameters": [
-            { "name": "model", "value": "text-embedding-3-small" },
-            { "name": "input", "value": "={{ $json.message }}" }
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
-        "options": {}
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{ $('Validate & Sanitize Input').item.json.message }}\"\n}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
       },
-      "name": "Generate Query Embedding",
+      "id": "embed-query",
+      "name": "Embed Query — OpenAI",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [690, 300],
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        340
+      ],
       "credentials": {
-        "httpHeaderAuth": { "id": "OPENAI_CREDENTIAL_ID", "name": "OpenAI API Key" }
-      }
+        "httpHeaderAuth": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Build pgvector query with embedding ──\nconst embedding = $('Embed Query — OpenAI').item.json.data[0].embedding;\nconst store_id = $('Validate & Sanitize Input').item.json.store_id;\nconst aiConfig = $('Fetch AI Config').item.json;\nconst topK = aiConfig.top_k_retrieval || 6;\nconst threshold = aiConfig.similarity_threshold || 0.70;\n\n// Format the embedding as a pgvector-compatible string\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > ${threshold} ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT ${topK};`,\n    store_id,\n    threshold\n  }\n}];"
+      },
+      "id": "build-rag-query",
+      "name": "Build RAG Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        340
+      ]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT id, content, metadata, 1 - (embedding <=> $1::vector) AS similarity FROM knowledge_chunks WHERE store_id = $2 AND is_active = TRUE AND 1 - (embedding <=> $1::vector) > 0.70 ORDER BY embedding <=> $1::vector LIMIT 6;",
+        "query": "={{ $json.query }}",
         "options": {}
       },
-      "name": "Vector Search — RAG",
+      "id": "vector-search",
+      "name": "Vector Search — pgvector",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2,
-      "position": [910, 300],
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        340
+      ],
       "credentials": {
-        "postgres": { "id": "SUPABASE_DB_CREDENTIAL_ID", "name": "Supabase DB" }
-      }
+        "postgres": {
+          "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+          "name": "Supabase PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
     },
     {
       "parameters": {
-        "jsCode": "// Assemble context from retrieved chunks\nconst chunks = $input.first().json;\nconst ragContext = Array.isArray(chunks) && chunks.length > 0\n  ? chunks.map((c, i) => `Source ${i+1}: ${c.content}`).join('\\n\\n')\n  : '[NO RELEVANT CONTEXT FOUND]';\n\nreturn [{ json: { ...($('Validate Input').first().json), rag_context: ragContext, chunk_ids: (chunks || []).map(c => c.id) } }];"
+        "jsCode": "// ── Assemble full context for GPT ──\nconst validatedInput = $('Validate & Sanitize Input').item.json;\nconst storeProfile = $('Fetch Store Profile').item.json;\nconst aiConfig = $('Fetch AI Config').item.json;\nconst chunks = $('Vector Search — pgvector').all().map(i => i.json);\n\nconst agentName = aiConfig.agent_name || storeProfile.agent_name || 'Alex';\nconst brandVoice = aiConfig.brand_voice || storeProfile.brand_tone || 'friendly';\nconst fallback = aiConfig.fallback_message || 'reach out to the store directly for help';\nconst upsellEnabled = aiConfig.upsell_enabled || false;\n\n// Build RAG context\nlet ragContext = '';\nconst chunkIds = [];\nif (chunks && chunks.length > 0) {\n  ragContext = chunks.map((c, i) => {\n    chunkIds.push(c.id);\n    return `[Source ${i + 1}]: ${c.content}`;\n  }).join('\\n\\n');\n} else {\n  ragContext = '[NO RELEVANT CONTEXT FOUND — use fallback message]';\n}\n\n// Build conversation history text\nconst history = validatedInput.conversation_history || [];\nlet historyText = history.length > 0\n  ? history.map(m => `${m.role === 'customer' ? 'Shopper' : 'AI'}: ${m.content}`).join('\\n')\n  : 'No previous messages.';\n\n// Voice instructions per brand\nconst voiceInstructions = {\n  friendly: 'Be warm, conversational, and approachable.',\n  formal: 'Maintain a professional, courteous tone.',\n  enthusiastic: 'Be energetic and positive. Express genuine excitement.',\n  professional: 'Be clear, direct, and efficient.',\n  casual: 'Be relaxed and easygoing.',\n  luxury: 'Be refined and exclusive. Use elegant language.'\n};\n\nconst systemPrompt = `You are ${agentName}, a helpful AI shopping assistant for ${storeProfile.store_name}.\n\nYour role is to:\n- Help shoppers find the right products for their needs\n- Answer questions about products, shipping, returns, and store policies\n- Suggest complementary items when genuinely relevant\n- Guide shoppers through their shopping decisions\n\nYour communication style is: ${brandVoice}\n${voiceInstructions[brandVoice] || voiceInstructions.friendly}\n\nCRITICAL RULES:\n1. ONLY answer using the RETRIEVED CONTEXT below. Do NOT use general training knowledge for store-specific facts.\n2. If the context does not contain the answer, say: \"I don't have that information available, but you can ${fallback}.\"\n3. Do NOT invent product prices, stock levels, or policy details.\n4. Do NOT promise anything not explicitly stated in the context.\n5. Keep responses concise — 3-5 sentences unless detail is clearly needed.\n6. If the shopper's intent is unclear, ask one specific clarifying question.\n${upsellEnabled ? '7. If related products exist in context, mention ONE naturally — never pushy.' : ''}\n\nRETRIEVED CONTEXT:\n${ragContext}\n\nCONVERSATION HISTORY:\n${historyText}`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage: validatedInput.message,\n    store_id: validatedInput.store_id,\n    session_id: validatedInput.session_id,\n    conversation_id: validatedInput.conversation_id,\n    chunk_ids: chunkIds,\n    rag_hit_count: chunks.length\n  }\n}];"
       },
-      "name": "Assemble Context",
+      "id": "assemble-context",
+      "name": "Assemble AI Context",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1130, 300]
+      "position": [
+        1760,
+        340
+      ]
     },
     {
       "parameters": {
-        "resource": "chat",
-        "model": "gpt-4o-mini",
-        "messages": {
-          "values": [
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
             {
-              "content": "You are a helpful AI shopping assistant. Use the provided context to answer questions.\n\n{{ $json.rag_context }}"
-            },
-            {
-              "content": "={{ $json.message }}"
+              "name": "Content-Type",
+              "value": "application/json"
             }
           ]
         },
-        "options": { "temperature": 0.4, "maxTokens": 500 }
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.systemPrompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.userMessage) }} }\n  ],\n  \"temperature\": 0.4,\n  \"max_tokens\": 600\n}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
       },
+      "id": "gpt-response",
       "name": "GPT-4o Mini — Generate Response",
-      "type": "@n8n/n8n-nodes-langchain.openAi",
-      "typeVersion": 1,
-      "position": [1350, 300],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        340
+      ],
       "credentials": {
-        "openAiApi": { "id": "OPENAI_CREDENTIAL_ID", "name": "OpenAI API Key" }
-      }
+        "httpHeaderAuth": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "messages",
-        "columns": "conversation_id,store_id,role,content,retrieved_chunk_ids",
+        "jsCode": "// ── Parse GPT response and prepare output ──\nconst gptResponse = $('GPT-4o Mini — Generate Response').item.json;\nconst context = $('Assemble AI Context').item.json;\n\nlet aiMessage = '';\nlet tokensUsed = 0;\n\ntry {\n  aiMessage = gptResponse.choices[0].message.content;\n  tokensUsed = gptResponse.usage?.total_tokens || 0;\n} catch (e) {\n  aiMessage = 'Sorry, I had trouble generating a response. Please try again.';\n}\n\n// Create or get conversation ID\nconst conversationId = context.conversation_id || require('crypto').randomUUID();\n\nreturn [{\n  json: {\n    message: aiMessage,\n    conversation_id: conversationId,\n    chunk_ids: context.chunk_ids,\n    tokens_used: tokensUsed,\n    store_id: context.store_id,\n    session_id: context.session_id,\n    user_message: context.userMessage,\n    rag_hit_count: context.rag_hit_count\n  }\n}];"
+      },
+      "id": "parse-response",
+      "name": "Parse GPT Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO messages (conversation_id, store_id, role, content, retrieved_chunk_ids) VALUES ('{{ $json.conversation_id }}', '{{ $json.store_id }}', 'customer', {{ $json.user_message | toJSON }}, NULL), ('{{ $json.conversation_id }}', '{{ $json.store_id }}', 'assistant', {{ $json.message | toJSON }}, '{{ JSON.stringify($json.chunk_ids) }}');",
         "options": {}
       },
-      "name": "Log Messages",
+      "id": "log-messages",
+      "name": "Log Messages to DB",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2,
-      "position": [1570, 300],
+      "typeVersion": 2.5,
+      "position": [
+        2420,
+        340
+      ],
       "credentials": {
-        "postgres": { "id": "SUPABASE_DB_CREDENTIAL_ID", "name": "Supabase DB" }
-      }
+        "postgres": {
+          "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+          "name": "Supabase PostgreSQL"
+        }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ message: $json.text || $json.content, conversation_id: $json.conversation_id, chunk_ids: $json.chunk_ids }) }}"
+        "responseBody": "={\n  \"message\": {{ JSON.stringify($('Parse GPT Response').item.json.message) }},\n  \"conversation_id\": \"{{ $('Parse GPT Response').item.json.conversation_id }}\",\n  \"chunk_ids\": {{ JSON.stringify($('Parse GPT Response').item.json.chunk_ids) }},\n  \"tokens_used\": {{ $('Parse GPT Response').item.json.tokens_used }}\n}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
+        }
       },
+      "id": "respond-webhook",
       "name": "Respond to Webhook",
       "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1,
-      "position": [1790, 300]
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        340
+      ]
     }
   ],
   "connections": {
-    "Webhook — Chat Request": { "main": [[ { "node": "Validate Input", "type": "main", "index": 0 } ]] },
-    "Validate Input": { "main": [[ { "node": "Generate Query Embedding", "type": "main", "index": 0 } ]] },
-    "Generate Query Embedding": { "main": [[ { "node": "Vector Search — RAG", "type": "main", "index": 0 } ]] },
-    "Vector Search — RAG": { "main": [[ { "node": "Assemble Context", "type": "main", "index": 0 } ]] },
-    "Assemble Context": { "main": [[ { "node": "GPT-4o Mini — Generate Response", "type": "main", "index": 0 } ]] },
-    "GPT-4o Mini — Generate Response": { "main": [[ { "node": "Log Messages", "type": "main", "index": 0 } ]] },
-    "Log Messages": { "main": [[ { "node": "Respond to Webhook", "type": "main", "index": 0 } ]] }
+    "Webhook — Chat Request": {
+      "main": [
+        [
+          {
+            "node": "Validate & Sanitize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Sanitize Input": {
+      "main": [
+        [
+          {
+            "node": "Fetch Store Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Store Profile": {
+      "main": [
+        [
+          {
+            "node": "Fetch AI Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch AI Config": {
+      "main": [
+        [
+          {
+            "node": "Embed Query — OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Query — OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Build RAG Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build RAG Query": {
+      "main": [
+        [
+          {
+            "node": "Vector Search — pgvector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vector Search — pgvector": {
+      "main": [
+        [
+          {
+            "node": "Assemble AI Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble AI Context": {
+      "main": [
+        [
+          {
+            "node": "GPT-4o Mini — Generate Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-4o Mini — Generate Response": {
+      "main": [
+        [
+          {
+            "node": "Parse GPT Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GPT Response": {
+      "main": [
+        [
+          {
+            "node": "Log Messages to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Messages to DB": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
   },
-  "settings": { "executionOrder": "v1" }
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "ShopMind AI"
+    },
+    {
+      "name": "Chat"
+    },
+    {
+      "name": "RAG"
+    }
+  ]
 }
