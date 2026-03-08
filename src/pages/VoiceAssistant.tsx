@@ -147,6 +147,7 @@ const VoiceAssistant = () => {
     const N8N_VOICE_WEBHOOK = import.meta.env.VITE_N8N_VOICE_WEBHOOK_URL || '';
     const currentStore = storeRef.current;
     let aiText = '';
+    let audioBase64: string | null = null;
 
     try {
       if (!N8N_VOICE_WEBHOOK) {
@@ -175,6 +176,7 @@ const VoiceAssistant = () => {
 
         const data = await response.json();
         aiText = data.ai_response || data.message || data.output || data.text || '';
+        audioBase64 = data.audio_base64 || null;
       }
     } catch (err) {
       console.error('Voice processing error:', err);
@@ -185,11 +187,15 @@ const VoiceAssistant = () => {
     setExchanges((prev) => [...prev.slice(-5), { customer: text, assistant: aiText }]);
     setVoiceState("speaking");
 
-    // ── Speak the response using Web Speech API ──
+    // ── Play audio: ElevenLabs (if available) → fallback to browser Speech Synthesis ──
     try {
-      await speakText(aiText);
+      if (audioBase64) {
+        await playElevenLabsAudio(audioBase64);
+      } else {
+        await speakText(aiText);
+      }
     } catch {
-      // If TTS fails, wait a fallback duration
+      // If all TTS fails, wait a fallback duration
       await new Promise((r) => setTimeout(r, 2000));
     }
 
@@ -199,6 +205,33 @@ const VoiceAssistant = () => {
     } else {
       setVoiceState("idle");
     }
+  };
+
+  /** Play ElevenLabs audio from base64 data */
+  const playElevenLabsAudio = (base64Audio: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const byteString = atob(base64Audio);
+        const byteArray = new Uint8Array(byteString.length);
+        for (let i = 0; i < byteString.length; i++) {
+          byteArray[i] = byteString.charCodeAt(i);
+        }
+        const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error('ElevenLabs audio playback failed'));
+        };
+        audio.play().catch(reject);
+      } catch (err) {
+        reject(err);
+      }
+    });
   };
 
   /** Speak text using the browser's native Speech Synthesis API */

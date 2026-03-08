@@ -145,7 +145,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Build pgvector RAG query ──\n// Since the native OpenAI embedding node may output differently,\n// we handle both raw array and nested formats\nconst embeddingResult = $('OpenAI — Embed Query').item.json;\nlet embedding;\n\nif (Array.isArray(embeddingResult.data)) {\n  embedding = embeddingResult.data[0].embedding;\n} else if (Array.isArray(embeddingResult.embedding)) {\n  embedding = embeddingResult.embedding;\n} else if (embeddingResult.data && embeddingResult.data.embedding) {\n  embedding = embeddingResult.data.embedding;\n} else {\n  // Fallback: try the whole json as embedding\n  embedding = embeddingResult;\n}\n\nconst store_id = $('Validate Voice Input').item.json.store_id;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst topK = aiConfig.top_k_retrieval || 5;\nconst threshold = aiConfig.similarity_threshold || 0.65;\n\nconst embeddingStr = '[' + (Array.isArray(embedding) ? embedding.join(',') : '') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > ${threshold} ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT ${topK};`,\n    store_id\n  }\n}];"
+                "jsCode": "// ── Build pgvector RAG query ──\nconst embeddingResult = $('OpenAI — Embed Query').item.json;\nlet embedding;\n\nif (Array.isArray(embeddingResult.data)) {\n  embedding = embeddingResult.data[0].embedding;\n} else if (Array.isArray(embeddingResult.embedding)) {\n  embedding = embeddingResult.embedding;\n} else if (embeddingResult.data && embeddingResult.data.embedding) {\n  embedding = embeddingResult.data.embedding;\n} else {\n  embedding = embeddingResult;\n}\n\nconst store_id = $('Validate Voice Input').item.json.store_id;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst topK = aiConfig.top_k_retrieval || 5;\nconst threshold = aiConfig.similarity_threshold || 0.65;\n\nconst embeddingStr = '[' + (Array.isArray(embedding) ? embedding.join(',') : '') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > ${threshold} ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT ${topK};`,\n    store_id\n  }\n}];"
             },
             "id": "a1b2c3d4-0006-4000-8000-000000000006",
             "name": "Build RAG Query",
@@ -182,7 +182,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Assemble context for short voice responses ──\nconst userMessage = $('Validate Voice Input').item.json.message;\nconst storeProfile = $('Supabase — Fetch Store').item.json;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst chunks = $('Supabase — RAG Search').all().map(i => i.json);\nconst conversationHistory = $('Validate Voice Input').item.json.conversation_history || [];\n\nconst agentName = aiConfig.agent_name || storeProfile.agent_name || 'Alex';\nconst brandVoice = aiConfig.brand_voice || storeProfile.brand_tone || 'friendly';\n\n// Build RAG context\nlet ragContext = chunks.length > 0\n  ? chunks.map((c, i) => `[Source ${i + 1}]: ${c.content}`).join('\\n\\n')\n  : '[NO RELEVANT CONTEXT FOUND]';\n\n// Build conversation history\nconst historyText = conversationHistory.length > 0\n  ? conversationHistory.slice(-6).map(m => `${m.role === 'customer' ? 'Shopper' : 'AI'}: ${m.content}`).join('\\n')\n  : '';\n\nconst systemPrompt = `You are ${agentName}, a helpful AI shopping assistant for ${storeProfile.store_name}.\n\nYour style is ${brandVoice}. This is a VOICE conversation — keep answers SHORT (2-3 sentences max).\n\nRETRIEVED CONTEXT:\n${ragContext}\n\n${historyText ? 'RECENT CONVERSATION:\\n' + historyText : ''}\n\nRULES:\n1. ONLY answer using the retrieved context above\n2. If context doesn't have the answer, say \"I don't have that information, but the store team can help\"\n3. Do NOT invent prices, stock, or policies\n4. Keep answers brief — this will be spoken aloud\n5. Be natural and conversational`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    store_id: $('Validate Voice Input').item.json.store_id,\n    session_id: $('Validate Voice Input').item.json.session_id,\n    agentName,\n    chunk_ids: chunks.map(c => c.id)\n  }\n}];"
+                "jsCode": "// ── Assemble context for short voice responses ──\nconst userMessage = $('Validate Voice Input').item.json.message;\nconst storeProfile = $('Supabase — Fetch Store').item.json;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst chunks = $('Supabase — RAG Search').all().map(i => i.json);\nconst conversationHistory = $('Validate Voice Input').item.json.conversation_history || [];\n\nconst agentName = aiConfig.agent_name || storeProfile.agent_name || 'Alex';\nconst brandVoice = aiConfig.brand_voice || storeProfile.brand_tone || 'friendly';\n\n// ElevenLabs voice configuration\n// Store owners can set their preferred voice_id in ai_configurations\nconst elevenlabsVoiceId = aiConfig.elevenlabs_voice_id || '21m00Tcm4TlvDq8ikWAM'; // Default: Rachel\nconst elevenlabsModelId = aiConfig.elevenlabs_model_id || 'eleven_turbo_v2_5';\n\n// Build RAG context\nlet ragContext = chunks.length > 0\n  ? chunks.map((c, i) => `[Source ${i + 1}]: ${c.content}`).join('\\n\\n')\n  : '[NO RELEVANT CONTEXT FOUND]';\n\nconst historyText = conversationHistory.length > 0\n  ? conversationHistory.slice(-6).map(m => `${m.role === 'customer' ? 'Shopper' : 'AI'}: ${m.content}`).join('\\n')\n  : '';\n\nconst systemPrompt = `You are ${agentName}, a helpful AI shopping assistant for ${storeProfile.store_name}.\n\nYour style is ${brandVoice}. This is a VOICE conversation — keep answers SHORT (2-3 sentences max).\n\nRETRIEVED CONTEXT:\n${ragContext}\n\n${historyText ? 'RECENT CONVERSATION:\\n' + historyText : ''}\n\nRULES:\n1. ONLY answer using the retrieved context above\n2. If context doesn't have the answer, say \"I don't have that information, but the store team can help\"\n3. Do NOT invent prices, stock, or policies\n4. Keep answers brief — this will be spoken aloud\n5. Be natural and conversational`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    store_id: $('Validate Voice Input').item.json.store_id,\n    session_id: $('Validate Voice Input').item.json.session_id,\n    agentName,\n    chunk_ids: chunks.map(c => c.id),\n    elevenlabs_voice_id: elevenlabsVoiceId,\n    elevenlabs_model_id: elevenlabsModelId\n  }\n}];"
             },
             "id": "a1b2c3d4-0008-4000-8000-000000000008",
             "name": "Assemble Voice Context",
@@ -238,7 +238,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Parse the OpenAI native node response ──\nconst gptResult = $input.first().json;\nconst context = $('Assemble Voice Context').item.json;\n\n// The native OpenAI Chat node typically returns in .message.content or .text\nlet aiText = gptResult.message?.content \n  || gptResult.text \n  || gptResult.choices?.[0]?.message?.content \n  || gptResult.output \n  || 'Sorry, I had trouble generating a response.';\n\nreturn [{\n  json: {\n    ai_response: aiText,\n    message: aiText,\n    transcript: context.userMessage,\n    conversation_id: context.session_id,\n    confidence: 0.95,\n    store_id: context.store_id,\n    agent_name: context.agentName,\n    chunk_ids: context.chunk_ids\n  }\n}];"
+                "jsCode": "// ── Parse the OpenAI native node response ──\nconst gptResult = $input.first().json;\nconst context = $('Assemble Voice Context').item.json;\n\nlet aiText = gptResult.message?.content \n  || gptResult.text \n  || gptResult.choices?.[0]?.message?.content \n  || gptResult.output \n  || 'Sorry, I had trouble generating a response.';\n\nreturn [{\n  json: {\n    ai_response: aiText,\n    message: aiText,\n    transcript: context.userMessage,\n    conversation_id: context.session_id,\n    confidence: 0.95,\n    store_id: context.store_id,\n    agent_name: context.agentName,\n    chunk_ids: context.chunk_ids,\n    elevenlabs_voice_id: context.elevenlabs_voice_id,\n    elevenlabs_model_id: context.elevenlabs_model_id\n  }\n}];"
             },
             "id": "a1b2c3d4-0010-4000-8000-000000000010",
             "name": "Parse AI Response",
@@ -246,6 +246,69 @@
             "typeVersion": 2,
             "position": [
                 2200,
+                340
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "=https://api.elevenlabs.io/v1/text-to-speech/{{ $json.elevenlabs_voice_id }}",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        },
+                        {
+                            "name": "Accept",
+                            "value": "audio/mpeg"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"text\": {{ JSON.stringify($json.ai_response) }},\n  \"model_id\": \"{{ $json.elevenlabs_model_id }}\",\n  \"voice_settings\": {\n    \"stability\": 0.5,\n    \"similarity_boost\": 0.75,\n    \"style\": 0.0,\n    \"use_speaker_boost\": true\n  }\n}",
+                "options": {
+                    "timeout": 30000,
+                    "response": {
+                        "response": {
+                            "responseFormat": "file"
+                        }
+                    }
+                }
+            },
+            "id": "a1b2c3d4-0013-4000-8000-000000000013",
+            "name": "ElevenLabs — Text to Speech",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2420,
+                340
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "YOUR_ELEVENLABS_CREDENTIAL_ID",
+                    "name": "ElevenLabs API Key"
+                }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000,
+            "notes": "🎤 CHANGE YOUR VOICE HERE\n\nTo use a different ElevenLabs voice:\n1. Go to elevenlabs.io → Voices\n2. Copy the Voice ID\n3. Set it in your ai_configurations table (elevenlabs_voice_id column)\n\nPopular Voice IDs:\n• Rachel: 21m00Tcm4TlvDq8ikWAM\n• Domi: AZnzlk1XvdvUeBnXmlld\n• Bella: EXAVITQu4vr4xnSDxMaL\n• Antoni: ErXwobaYiN019PkySvjV\n• Elli: MF3mGyEYCl7XYWbV9V6O\n• Josh: TxGEqnHWrfWFTfGW9XjX\n• Arnold: VR6AewLTigWG4xSOukaG\n• Adam: pNInz6obpgDQGcFmaJgB\n• Sam: yoZ06aMxZJJ28mfd3POQ\n\nModels:\n• eleven_turbo_v2_5 (fastest, recommended)\n• eleven_multilingual_v2 (best quality)\n• eleven_monolingual_v1 (English only)"
+        },
+        {
+            "parameters": {
+                "jsCode": "// ── Encode ElevenLabs audio as base64 for frontend playback ──\nconst binary = $input.first().binary;\nconst parsedResponse = $('Parse AI Response').item.json;\n\nlet audioBase64 = null;\n\nif (binary && binary.data) {\n  // n8n stores binary data - convert to base64 string\n  const binaryData = binary.data;\n  audioBase64 = binaryData.data || null; // Already base64 from n8n\n}\n\nreturn [{\n  json: {\n    ai_response: parsedResponse.ai_response,\n    message: parsedResponse.message,\n    transcript: parsedResponse.transcript,\n    conversation_id: parsedResponse.conversation_id,\n    confidence: parsedResponse.confidence,\n    store_id: parsedResponse.store_id,\n    agent_name: parsedResponse.agent_name,\n    chunk_ids: parsedResponse.chunk_ids,\n    audio_base64: audioBase64\n  }\n}];"
+            },
+            "id": "a1b2c3d4-0014-4000-8000-000000000014",
+            "name": "Encode Audio for Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2640,
                 340
             ]
         },
@@ -260,7 +323,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.5,
             "position": [
-                2420,
+                2860,
                 340
             ],
             "credentials": {
@@ -274,7 +337,7 @@
         {
             "parameters": {
                 "respondWith": "json",
-                "responseBody": "={\n  \"ai_response\": {{ JSON.stringify($('Parse AI Response').item.json.ai_response) }},\n  \"message\": {{ JSON.stringify($('Parse AI Response').item.json.message) }},\n  \"transcript\": {{ JSON.stringify($('Parse AI Response').item.json.transcript) }},\n  \"conversation_id\": \"{{ $('Parse AI Response').item.json.conversation_id }}\",\n  \"confidence\": {{ $('Parse AI Response').item.json.confidence }},\n  \"audio_url\": null\n}",
+                "responseBody": "={\n  \"ai_response\": {{ JSON.stringify($('Encode Audio for Response').item.json.ai_response) }},\n  \"message\": {{ JSON.stringify($('Encode Audio for Response').item.json.message) }},\n  \"transcript\": {{ JSON.stringify($('Encode Audio for Response').item.json.transcript) }},\n  \"conversation_id\": \"{{ $('Encode Audio for Response').item.json.conversation_id }}\",\n  \"confidence\": {{ $('Encode Audio for Response').item.json.confidence }},\n  \"audio_base64\": {{ JSON.stringify($('Encode Audio for Response').item.json.audio_base64) }}\n}",
                 "options": {
                     "responseHeaders": {
                         "entries": [
@@ -295,7 +358,7 @@
             "type": "n8n-nodes-base.respondToWebhook",
             "typeVersion": 1.1,
             "position": [
-                2640,
+                3080,
                 340
             ]
         }
@@ -404,6 +467,28 @@
             "main": [
                 [
                     {
+                        "node": "ElevenLabs — Text to Speech",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "ElevenLabs — Text to Speech": {
+            "main": [
+                [
+                    {
+                        "node": "Encode Audio for Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Encode Audio for Response": {
+            "main": [
+                [
+                    {
                         "node": "Supabase — Log Messages",
                         "type": "main",
                         "index": 0
@@ -436,7 +521,7 @@
             "name": "Voice"
         },
         {
-            "name": "Production"
+            "name": "ElevenLabs"
         }
     ]
 }
