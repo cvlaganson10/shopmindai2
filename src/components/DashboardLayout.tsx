@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useLocation, Outlet } from "react-router-dom";
+import { Link, useLocation, Outlet, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
@@ -11,9 +11,9 @@ import {
   Sparkles,
   LogOut,
   Menu,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/contexts/AuthContext";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -26,20 +26,28 @@ const navItems = [
 
 const DashboardLayout = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { user, signOut } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const currentPage = navItems.find(
     (item) => location.pathname === item.path || (item.path !== "/dashboard" && location.pathname.startsWith(item.path))
   ) || navItems[0];
 
+  const handleSignOut = async () => {
+    await signOut();
+    navigate("/");
+  };
+
+  const displayName = user?.user_metadata?.full_name || user?.email?.split("@")[0] || "User";
+  const initials = displayName.charAt(0).toUpperCase();
+
   return (
     <div className="flex h-screen bg-background overflow-hidden">
-      {/* Mobile overlay */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm md:hidden" onClick={() => setSidebarOpen(false)} />
       )}
 
-      {/* Sidebar */}
       <aside
         className={cn(
           "fixed md:static inset-y-0 left-0 z-50 w-60 flex flex-col border-r border-border bg-sidebar transition-transform md:translate-x-0",
@@ -76,40 +84,29 @@ const DashboardLayout = () => {
         <div className="border-t border-border p-4">
           <div className="flex items-center gap-3">
             <div className="h-8 w-8 rounded-full bg-primary/20 flex items-center justify-center text-sm font-semibold text-primary">
-              U
+              {initials}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-foreground truncate">User</p>
-              <p className="text-xs text-muted-foreground truncate">user@example.com</p>
+              <p className="text-sm font-medium text-foreground truncate">{displayName}</p>
+              <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
             </div>
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">
+            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={handleSignOut}>
               <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </div>
       </aside>
 
-      {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar */}
         <header className="flex items-center justify-between border-b border-border px-6 py-4">
           <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="md:hidden text-muted-foreground"
-              onClick={() => setSidebarOpen(true)}
-            >
+            <Button variant="ghost" size="icon" className="md:hidden text-muted-foreground" onClick={() => setSidebarOpen(true)}>
               <Menu className="h-5 w-5" />
             </Button>
             <h1 className="font-heading text-xl font-semibold text-foreground">{currentPage.label}</h1>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs bg-primary/10 text-primary rounded-full px-3 py-1 font-medium">My Store</span>
-          </div>
         </header>
 
-        {/* Page content */}
         <main className="flex-1 overflow-y-auto p-6">
           <Outlet />
         </main>
