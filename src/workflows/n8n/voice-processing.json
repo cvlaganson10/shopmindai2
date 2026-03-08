@@ -10,8 +10,8 @@
                     "rawBody": true
                 }
             },
-            "id": "voice-webhook",
-            "name": "Webhook — Voice Processing",
+            "id": "a1b2c3d4-0001-4000-8000-000000000001",
+            "name": "Webhook — Voice Request",
             "type": "n8n-nodes-base.webhook",
             "typeVersion": 2,
             "position": [
@@ -22,9 +22,9 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Extract FormData fields ──\nconst body = $input.first().json.body;\nconst binary = $input.first().binary;\n\nconst store_id = body.store_id;\nconst session_id = body.session_id;\nconst conversation_id = body.conversation_id || null;\n\nif (!store_id) throw new Error('Missing required field: store_id');\n\n// The audio binary should be in the 'audio' field from FormData\nif (!binary || !binary.audio) {\n  throw new Error('Missing audio data in request');\n}\n\nreturn [{\n  json: {\n    store_id,\n    session_id,\n    conversation_id\n  },\n  binary: {\n    audio: binary.audio\n  }\n}];"
+                "jsCode": "// ── Validate & sanitize voice input ──\nconst body = $input.first().json.body;\n\nconst store_id = body.store_id;\nconst session_id = body.session_id || `voice-${store_id}-${Date.now()}`;\nconst message = (body.message || '').trim().slice(0, 2000);\nconst conversation_history = body.conversation_history || [];\n\nif (!store_id) throw new Error('Missing required field: store_id');\nif (!message) throw new Error('Missing required field: message');\n\n// Prompt injection defense\nconst injectionPatterns = [\n  'ignore previous instructions',\n  'ignore all instructions',\n  'disregard your instructions',\n  'system prompt',\n  'you are now',\n  'jailbreak',\n  'DAN mode'\n];\n\nlet safeMessage = message;\ninjectionPatterns.forEach(pattern => {\n  safeMessage = safeMessage.replace(new RegExp(pattern, 'gi'), '[removed]');\n});\n\nreturn [{\n  json: {\n    store_id,\n    session_id,\n    message: safeMessage,\n    conversation_history\n  }\n}];"
             },
-            "id": "voice-validate",
+            "id": "a1b2c3d4-0002-4000-8000-000000000002",
             "name": "Validate Voice Input",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
@@ -35,104 +35,108 @@
         },
         {
             "parameters": {
-                "method": "POST",
-                "url": "https://api.openai.com/v1/audio/transcriptions",
-                "authentication": "genericCredentialType",
-                "genericAuthType": "httpHeaderAuth",
-                "contentType": "multipart-form-data",
-                "sendBody": true,
-                "bodyParameters": {
+                "operation": "select",
+                "schema": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "public"
+                },
+                "table": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "store_profiles"
+                },
+                "filterByClause": {
                     "parameters": [
                         {
-                            "name": "model",
-                            "value": "whisper-1"
+                            "name": "id",
+                            "value": "={{ $json.store_id }}"
                         },
                         {
-                            "name": "language",
-                            "value": "en"
-                        },
-                        {
-                            "name": "response_format",
-                            "value": "verbose_json"
+                            "name": "is_active",
+                            "value": "true"
                         }
                     ]
                 },
-                "sendBinaryData": true,
-                "binaryPropertyName": "audio",
-                "options": {
-                    "timeout": 30000,
-                    "response": {
-                        "response": {
-                            "responseFormat": "json"
-                        }
-                    }
-                }
+                "limit": 1,
+                "options": {}
             },
-            "id": "stt-whisper",
-            "name": "STT — Whisper",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
+            "id": "a1b2c3d4-0003-4000-8000-000000000003",
+            "name": "Supabase — Fetch Store",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
             "position": [
                 660,
                 340
             ],
             "credentials": {
-                "httpHeaderAuth": {
-                    "id": "YOUR_OPENAI_CREDENTIAL_ID",
-                    "name": "OpenAI API Key"
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
                 }
             },
             "retryOnFail": true,
-            "maxTries": 2,
+            "maxTries": 3,
             "waitBetweenTries": 2000
         },
         {
             "parameters": {
-                "jsCode": "// ── Extract transcript and check confidence ──\nconst sttResult = $input.first().json;\nconst transcript = (sttResult.text || '').trim();\nconst language = sttResult.language || 'en';\n\nif (!transcript) {\n  throw new Error('Could not transcribe audio — no speech detected');\n}\n\nreturn [{\n  json: {\n    transcript,\n    language,\n    store_id: $('Validate Voice Input').item.json.store_id,\n    session_id: $('Validate Voice Input').item.json.session_id,\n    conversation_id: $('Validate Voice Input').item.json.conversation_id\n  }\n}];"
-            },
-            "id": "extract-transcript",
-            "name": "Extract Transcript",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                880,
-                340
-            ]
-        },
-        {
-            "parameters": {
-                "method": "POST",
-                "url": "https://api.openai.com/v1/embeddings",
-                "authentication": "genericCredentialType",
-                "genericAuthType": "httpHeaderAuth",
-                "sendHeaders": true,
-                "headerParameters": {
+                "operation": "select",
+                "schema": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "public"
+                },
+                "table": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "ai_configurations"
+                },
+                "filterByClause": {
                     "parameters": [
                         {
-                            "name": "Content-Type",
-                            "value": "application/json"
+                            "name": "store_id",
+                            "value": "={{ $('Validate Voice Input').item.json.store_id }}"
                         }
                     ]
                 },
-                "sendBody": true,
-                "specifyBody": "json",
-                "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{ $json.transcript }}\"\n}",
-                "options": {
-                    "timeout": 30000
-                }
+                "limit": 1,
+                "options": {}
             },
-            "id": "voice-embed",
-            "name": "Embed Transcript — OpenAI",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
+            "id": "a1b2c3d4-0004-4000-8000-000000000004",
+            "name": "Supabase — Fetch AI Config",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
+            "position": [
+                880,
+                340
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "resource": "text",
+                "operation": "embed",
+                "model": "text-embedding-3-small",
+                "text": "={{ $('Validate Voice Input').item.json.message }}"
+            },
+            "id": "a1b2c3d4-0005-4000-8000-000000000005",
+            "name": "OpenAI — Embed Query",
+            "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+            "typeVersion": 1,
             "position": [
                 1100,
                 340
             ],
             "credentials": {
-                "httpHeaderAuth": {
+                "openAiApi": {
                     "id": "YOUR_OPENAI_CREDENTIAL_ID",
-                    "name": "OpenAI API Key"
+                    "name": "OpenAI Account"
                 }
             },
             "retryOnFail": true,
@@ -141,10 +145,10 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Build RAG query for voice transcript ──\nconst embedding = $('Embed Transcript — OpenAI').item.json.data[0].embedding;\nconst store_id = $('Extract Transcript').item.json.store_id;\nconst embeddingStr = '[' + embedding.join(',') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > 0.65 ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT 5;`,\n    store_id\n  }\n}];"
+                "jsCode": "// ── Build pgvector RAG query ──\n// Since the native OpenAI embedding node may output differently,\n// we handle both raw array and nested formats\nconst embeddingResult = $('OpenAI — Embed Query').item.json;\nlet embedding;\n\nif (Array.isArray(embeddingResult.data)) {\n  embedding = embeddingResult.data[0].embedding;\n} else if (Array.isArray(embeddingResult.embedding)) {\n  embedding = embeddingResult.embedding;\n} else if (embeddingResult.data && embeddingResult.data.embedding) {\n  embedding = embeddingResult.data.embedding;\n} else {\n  // Fallback: try the whole json as embedding\n  embedding = embeddingResult;\n}\n\nconst store_id = $('Validate Voice Input').item.json.store_id;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst topK = aiConfig.top_k_retrieval || 5;\nconst threshold = aiConfig.similarity_threshold || 0.65;\n\nconst embeddingStr = '[' + (Array.isArray(embedding) ? embedding.join(',') : '') + ']';\n\nreturn [{\n  json: {\n    query: `SELECT id, content, metadata, 1 - (embedding <=> '${embeddingStr}'::vector) AS similarity FROM knowledge_chunks WHERE store_id = '${store_id}' AND is_active = true AND 1 - (embedding <=> '${embeddingStr}'::vector) > ${threshold} ORDER BY embedding <=> '${embeddingStr}'::vector LIMIT ${topK};`,\n    store_id\n  }\n}];"
             },
-            "id": "voice-rag-query",
-            "name": "Build Voice RAG Query",
+            "id": "a1b2c3d4-0006-4000-8000-000000000006",
+            "name": "Build RAG Query",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
@@ -158,8 +162,8 @@
                 "query": "={{ $json.query }}",
                 "options": {}
             },
-            "id": "voice-vector-search",
-            "name": "Voice RAG Search",
+            "id": "a1b2c3d4-0007-4000-8000-000000000007",
+            "name": "Supabase — RAG Search",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.5,
             "position": [
@@ -171,13 +175,16 @@
                     "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
                     "name": "Supabase PostgreSQL"
                 }
-            }
+            },
+            "retryOnFail": true,
+            "maxTries": 2,
+            "waitBetweenTries": 1000
         },
         {
             "parameters": {
-                "jsCode": "// ── Assemble context for voice AI ──\nconst transcript = $('Extract Transcript').item.json.transcript;\nconst store_id = $('Extract Transcript').item.json.store_id;\nconst chunks = $('Voice RAG Search').all().map(i => i.json);\n\nlet ragContext = chunks.length > 0\n  ? chunks.map((c, i) => `[Source ${i + 1}]: ${c.content}`).join('\\n\\n')\n  : '[NO CONTEXT FOUND]';\n\nconst systemPrompt = `You are a friendly AI shopping assistant. Answer the customer's spoken question using ONLY the context below. Keep your answer short (2-3 sentences) — this will be spoken aloud.\n\nRETRIEVED CONTEXT:\n${ragContext}\n\nRULES:\n- Keep answers brief and natural for voice output\n- If context doesn't have the answer, say \"I'm not sure about that, but the store team can help you with that.\"\n- Do NOT invent product details`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    transcript,\n    store_id\n  }\n}];"
+                "jsCode": "// ── Assemble context for short voice responses ──\nconst userMessage = $('Validate Voice Input').item.json.message;\nconst storeProfile = $('Supabase — Fetch Store').item.json;\nconst aiConfig = $('Supabase — Fetch AI Config').item.json || {};\nconst chunks = $('Supabase — RAG Search').all().map(i => i.json);\nconst conversationHistory = $('Validate Voice Input').item.json.conversation_history || [];\n\nconst agentName = aiConfig.agent_name || storeProfile.agent_name || 'Alex';\nconst brandVoice = aiConfig.brand_voice || storeProfile.brand_tone || 'friendly';\n\n// Build RAG context\nlet ragContext = chunks.length > 0\n  ? chunks.map((c, i) => `[Source ${i + 1}]: ${c.content}`).join('\\n\\n')\n  : '[NO RELEVANT CONTEXT FOUND]';\n\n// Build conversation history\nconst historyText = conversationHistory.length > 0\n  ? conversationHistory.slice(-6).map(m => `${m.role === 'customer' ? 'Shopper' : 'AI'}: ${m.content}`).join('\\n')\n  : '';\n\nconst systemPrompt = `You are ${agentName}, a helpful AI shopping assistant for ${storeProfile.store_name}.\n\nYour style is ${brandVoice}. This is a VOICE conversation — keep answers SHORT (2-3 sentences max).\n\nRETRIEVED CONTEXT:\n${ragContext}\n\n${historyText ? 'RECENT CONVERSATION:\\n' + historyText : ''}\n\nRULES:\n1. ONLY answer using the retrieved context above\n2. If context doesn't have the answer, say \"I don't have that information, but the store team can help\"\n3. Do NOT invent prices, stock, or policies\n4. Keep answers brief — this will be spoken aloud\n5. Be natural and conversational`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    store_id: $('Validate Voice Input').item.json.store_id,\n    session_id: $('Validate Voice Input').item.json.session_id,\n    agentName,\n    chunk_ids: chunks.map(c => c.id)\n  }\n}];"
             },
-            "id": "voice-context",
+            "id": "a1b2c3d4-0008-4000-8000-000000000008",
             "name": "Assemble Voice Context",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
@@ -188,38 +195,41 @@
         },
         {
             "parameters": {
-                "method": "POST",
-                "url": "https://api.openai.com/v1/chat/completions",
-                "authentication": "genericCredentialType",
-                "genericAuthType": "httpHeaderAuth",
-                "sendHeaders": true,
-                "headerParameters": {
-                    "parameters": [
+                "resource": "chatMessage",
+                "model": {
+                    "__rl": true,
+                    "mode": "list",
+                    "value": "gpt-4o-mini"
+                },
+                "messages": {
+                    "values": [
                         {
-                            "name": "Content-Type",
-                            "value": "application/json"
+                            "role": "system",
+                            "content": "={{ $json.systemPrompt }}"
+                        },
+                        {
+                            "role": "user",
+                            "content": "={{ $json.userMessage }}"
                         }
                     ]
                 },
-                "sendBody": true,
-                "specifyBody": "json",
-                "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": {{ JSON.stringify($json.systemPrompt) }} },\n    { \"role\": \"user\", \"content\": {{ JSON.stringify($json.transcript) }} }\n  ],\n  \"temperature\": 0.4,\n  \"max_tokens\": 200\n}",
                 "options": {
-                    "timeout": 60000
+                    "temperature": 0.4,
+                    "maxTokens": 200
                 }
             },
-            "id": "voice-gpt",
-            "name": "GPT — Voice Response",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
+            "id": "a1b2c3d4-0009-4000-8000-000000000009",
+            "name": "OpenAI Chat — Generate Response",
+            "type": "@n8n/n8n-nodes-langchain.openAi",
+            "typeVersion": 1.8,
             "position": [
                 1980,
                 340
             ],
             "credentials": {
-                "httpHeaderAuth": {
+                "openAiApi": {
                     "id": "YOUR_OPENAI_CREDENTIAL_ID",
-                    "name": "OpenAI API Key"
+                    "name": "OpenAI Account"
                 }
             },
             "retryOnFail": true,
@@ -228,10 +238,10 @@
         },
         {
             "parameters": {
-                "jsCode": "// ── Extract GPT text response ──\nconst gptResponse = $input.first().json;\nlet aiText = '';\ntry {\n  aiText = gptResponse.choices[0].message.content;\n} catch(e) {\n  aiText = 'Sorry, I had trouble understanding. Could you try saying that again?';\n}\n\nreturn [{\n  json: {\n    ai_response: aiText,\n    transcript: $('Extract Transcript').item.json.transcript,\n    store_id: $('Extract Transcript').item.json.store_id,\n    session_id: $('Extract Transcript').item.json.session_id,\n    conversation_id: $('Extract Transcript').item.json.conversation_id\n  }\n}];"
+                "jsCode": "// ── Parse the OpenAI native node response ──\nconst gptResult = $input.first().json;\nconst context = $('Assemble Voice Context').item.json;\n\n// The native OpenAI Chat node typically returns in .message.content or .text\nlet aiText = gptResult.message?.content \n  || gptResult.text \n  || gptResult.choices?.[0]?.message?.content \n  || gptResult.output \n  || 'Sorry, I had trouble generating a response.';\n\nreturn [{\n  json: {\n    ai_response: aiText,\n    message: aiText,\n    transcript: context.userMessage,\n    conversation_id: context.session_id,\n    confidence: 0.95,\n    store_id: context.store_id,\n    agent_name: context.agentName,\n    chunk_ids: context.chunk_ids\n  }\n}];"
             },
-            "id": "parse-voice-response",
-            "name": "Parse Voice Response",
+            "id": "a1b2c3d4-0010-4000-8000-000000000010",
+            "name": "Parse AI Response",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
@@ -241,93 +251,57 @@
         },
         {
             "parameters": {
-                "method": "POST",
-                "url": "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
-                "authentication": "genericCredentialType",
-                "genericAuthType": "httpHeaderAuth",
-                "sendHeaders": true,
-                "headerParameters": {
-                    "parameters": [
-                        {
-                            "name": "Content-Type",
-                            "value": "application/json"
-                        },
-                        {
-                            "name": "Accept",
-                            "value": "audio/mpeg"
-                        }
-                    ]
-                },
-                "sendBody": true,
-                "specifyBody": "json",
-                "jsonBody": "={\n  \"text\": {{ JSON.stringify($json.ai_response) }},\n  \"model_id\": \"eleven_turbo_v2_5\",\n  \"voice_settings\": {\n    \"stability\": 0.5,\n    \"similarity_boost\": 0.75,\n    \"style\": 0.0,\n    \"use_speaker_boost\": true\n  }\n}",
-                "options": {
-                    "timeout": 30000,
-                    "response": {
-                        "response": {
-                            "responseFormat": "file"
-                        }
-                    }
-                }
+                "operation": "executeQuery",
+                "query": "=INSERT INTO messages (conversation_id, store_id, role, content) VALUES ('{{ $json.conversation_id }}', '{{ $json.store_id }}', 'customer', {{ $json.transcript | toJSON }}), ('{{ $json.conversation_id }}', '{{ $json.store_id }}', 'assistant', {{ $json.ai_response | toJSON }});",
+                "options": {}
             },
-            "id": "tts-elevenlabs",
-            "name": "TTS — ElevenLabs",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
+            "id": "a1b2c3d4-0011-4000-8000-000000000011",
+            "name": "Supabase — Log Messages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.5,
             "position": [
                 2420,
                 340
             ],
             "credentials": {
-                "httpHeaderAuth": {
-                    "id": "YOUR_ELEVENLABS_CREDENTIAL_ID",
-                    "name": "ElevenLabs API Key"
+                "postgres": {
+                    "id": "YOUR_SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase PostgreSQL"
                 }
             },
-            "retryOnFail": true,
-            "maxTries": 2,
-            "waitBetweenTries": 2000
-        },
-        {
-            "parameters": {
-                "jsCode": "// ── Upload TTS audio to Supabase Storage and get public URL ──\nconst binary = $input.first().binary;\nconst voiceData = $('Parse Voice Response').item.json;\n\n// We'll pass through data + binary for the response\nreturn [{\n  json: {\n    transcript: voiceData.transcript,\n    ai_response: voiceData.ai_response,\n    conversation_id: voiceData.conversation_id || require('crypto').randomUUID(),\n    confidence: 0.95,\n    has_audio: !!binary\n  },\n  binary: binary\n}];"
-            },
-            "id": "prepare-response",
-            "name": "Prepare Voice Response",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                2640,
-                340
-            ]
+            "onError": "continueRegularOutput"
         },
         {
             "parameters": {
                 "respondWith": "json",
-                "responseBody": "={\n  \"transcript\": {{ JSON.stringify($json.transcript) }},\n  \"ai_response\": {{ JSON.stringify($json.ai_response) }},\n  \"conversation_id\": \"{{ $json.conversation_id }}\",\n  \"confidence\": {{ $json.confidence }},\n  \"audio_url\": null\n}",
+                "responseBody": "={\n  \"ai_response\": {{ JSON.stringify($('Parse AI Response').item.json.ai_response) }},\n  \"message\": {{ JSON.stringify($('Parse AI Response').item.json.message) }},\n  \"transcript\": {{ JSON.stringify($('Parse AI Response').item.json.transcript) }},\n  \"conversation_id\": \"{{ $('Parse AI Response').item.json.conversation_id }}\",\n  \"confidence\": {{ $('Parse AI Response').item.json.confidence }},\n  \"audio_url\": null\n}",
                 "options": {
                     "responseHeaders": {
                         "entries": [
                             {
                                 "name": "Access-Control-Allow-Origin",
                                 "value": "*"
+                            },
+                            {
+                                "name": "Access-Control-Allow-Headers",
+                                "value": "Content-Type"
                             }
                         ]
                     }
                 }
             },
-            "id": "voice-respond",
-            "name": "Respond — Voice",
+            "id": "a1b2c3d4-0012-4000-8000-000000000012",
+            "name": "Respond to Frontend",
             "type": "n8n-nodes-base.respondToWebhook",
             "typeVersion": 1.1,
             "position": [
-                2860,
+                2640,
                 340
             ]
         }
     ],
     "connections": {
-        "Webhook — Voice Processing": {
+        "Webhook — Voice Request": {
             "main": [
                 [
                     {
@@ -342,58 +316,58 @@
             "main": [
                 [
                     {
-                        "node": "STT — Whisper",
+                        "node": "Supabase — Fetch Store",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "STT — Whisper": {
+        "Supabase — Fetch Store": {
             "main": [
                 [
                     {
-                        "node": "Extract Transcript",
+                        "node": "Supabase — Fetch AI Config",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Extract Transcript": {
+        "Supabase — Fetch AI Config": {
             "main": [
                 [
                     {
-                        "node": "Embed Transcript — OpenAI",
+                        "node": "OpenAI — Embed Query",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Embed Transcript — OpenAI": {
+        "OpenAI — Embed Query": {
             "main": [
                 [
                     {
-                        "node": "Build Voice RAG Query",
+                        "node": "Build RAG Query",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Build Voice RAG Query": {
+        "Build RAG Query": {
             "main": [
                 [
                     {
-                        "node": "Voice RAG Search",
+                        "node": "Supabase — RAG Search",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Voice RAG Search": {
+        "Supabase — RAG Search": {
             "main": [
                 [
                     {
@@ -408,51 +382,40 @@
             "main": [
                 [
                     {
-                        "node": "GPT — Voice Response",
+                        "node": "OpenAI Chat — Generate Response",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "GPT — Voice Response": {
+        "OpenAI Chat — Generate Response": {
             "main": [
                 [
                     {
-                        "node": "Parse Voice Response",
+                        "node": "Parse AI Response",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Parse Voice Response": {
+        "Parse AI Response": {
             "main": [
                 [
                     {
-                        "node": "TTS — ElevenLabs",
+                        "node": "Supabase — Log Messages",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "TTS — ElevenLabs": {
+        "Supabase — Log Messages": {
             "main": [
                 [
                     {
-                        "node": "Prepare Voice Response",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Prepare Voice Response": {
-            "main": [
-                [
-                    {
-                        "node": "Respond — Voice",
+                        "node": "Respond to Frontend",
                         "type": "main",
                         "index": 0
                     }
@@ -473,7 +436,7 @@
             "name": "Voice"
         },
         {
-            "name": "STT/TTS"
+            "name": "Production"
         }
     ]
 }

@@ -144,16 +144,54 @@ const VoiceAssistant = () => {
     setVoiceState("processing");
     setTranscript("");
 
-    // Simulate AI response (replace with n8n webhook call)
-    await new Promise((r) => setTimeout(r, 2000));
+    const N8N_VOICE_WEBHOOK = import.meta.env.VITE_N8N_VOICE_WEBHOOK_URL || '';
     const currentStore = storeRef.current;
-    const response = `Thanks for saying "${text}". I'm ${currentStore?.agent_name || "your AI assistant"}. Connect your n8n voice webhook for real AI responses with voice output.`;
-    setAiResponse(response);
-    setExchanges((prev) => [...prev.slice(-5), { customer: text, assistant: response }]);
+    let aiText = '';
+
+    try {
+      if (!N8N_VOICE_WEBHOOK) {
+        // Fallback: if webhook not configured, use simulated response
+        await new Promise((r) => setTimeout(r, 1500));
+        aiText = `Thanks for saying "${text}". I'm ${currentStore?.agent_name || "your AI assistant"}. Connect your n8n voice webhook for real AI responses.`;
+      } else {
+        // ── REAL n8n Voice Pipeline Call ──
+        const response = await fetch(N8N_VOICE_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            store_id: storeId,
+            session_id: `voice-${storeId}-${Date.now()}`,
+            message: text,
+            conversation_history: exchanges.map(ex => [
+              { role: 'customer', content: ex.customer },
+              { role: 'assistant', content: ex.assistant }
+            ]).flat(),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Voice webhook failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        aiText = data.ai_response || data.message || data.output || data.text || '';
+      }
+    } catch (err) {
+      console.error('Voice processing error:', err);
+      aiText = `Sorry, I had trouble processing that. Please try again.`;
+    }
+
+    setAiResponse(aiText);
+    setExchanges((prev) => [...prev.slice(-5), { customer: text, assistant: aiText }]);
     setVoiceState("speaking");
 
-    // Simulate speaking duration
-    await new Promise((r) => setTimeout(r, 3000));
+    // ── Speak the response using Web Speech API ──
+    try {
+      await speakText(aiText);
+    } catch {
+      // If TTS fails, wait a fallback duration
+      await new Promise((r) => setTimeout(r, 2000));
+    }
 
     // CONTINUOUS MODE: Automatically resume listening if call is still active
     if (callActiveRef.current) {
@@ -161,6 +199,37 @@ const VoiceAssistant = () => {
     } else {
       setVoiceState("idle");
     }
+  };
+
+  /** Speak text using the browser's native Speech Synthesis API */
+  const speakText = (text: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      if (!('speechSynthesis' in window)) {
+        reject(new Error('Speech synthesis not supported'));
+        return;
+      }
+
+      // Cancel any ongoing speech
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+      utterance.lang = 'en-US';
+
+      // Try to pick a good voice
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(v =>
+        v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Natural')
+      ) || voices.find(v => v.lang.startsWith('en'));
+      if (preferredVoice) utterance.voice = preferredVoice;
+
+      utterance.onend = () => resolve();
+      utterance.onerror = () => reject(new Error('Speech synthesis error'));
+
+      window.speechSynthesis.speak(utterance);
+    });
   };
 
   const orbStyles: Record<VoiceState, string> = {
