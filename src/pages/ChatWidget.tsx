@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Send, Mic, Volume2 } from "lucide-react";
-import { v4 as uuidv4 } from "crypto";
+
 
 interface Message {
   id: string;
