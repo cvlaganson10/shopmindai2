@@ -15,6 +15,8 @@ import ConversationsPage from "./pages/ConversationsPage";
 import ProductsPage from "./pages/ProductsPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import SettingsPage from "./pages/SettingsPage";
+import ChatWidget from "./pages/ChatWidget";
+import VoiceAssistant from "./pages/VoiceAssistant";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -30,6 +32,8 @@ const App = () => (
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
+            <Route path="/chat/:storeId" element={<ChatWidget />} />
+            <Route path="/voice/:storeId" element={<VoiceAssistant />} />
             <Route
               path="/dashboard"
               element={
