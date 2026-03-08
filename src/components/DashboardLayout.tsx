@@ -11,17 +11,25 @@ import {
   Sparkles,
   LogOut,
   Menu,
+  Database,
+  Bot,
+  CreditCard,
+  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
 
 const navItems = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
-  { icon: Upload, label: "Knowledge Base", path: "/dashboard/upload" },
-  { icon: MessageSquare, label: "Conversations", path: "/dashboard/conversations" },
-  { icon: Package, label: "Products", path: "/dashboard/products" },
-  { icon: BarChart3, label: "Analytics", path: "/dashboard/analytics" },
-  { icon: Settings, label: "Settings", path: "/dashboard/settings" },
+  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard", section: "main" },
+  { icon: Upload, label: "Upload Files", path: "/dashboard/upload", section: "main" },
+  { icon: Database, label: "Knowledge Base", path: "/dashboard/knowledge-base", section: "main" },
+  { icon: MessageSquare, label: "Conversations", path: "/dashboard/conversations", section: "main" },
+  { icon: Package, label: "Products", path: "/dashboard/products", section: "main" },
+  { icon: BarChart3, label: "Analytics", path: "/dashboard/analytics", section: "main" },
+  { icon: Bot, label: "Agent Settings", path: "/dashboard/agent-settings", section: "config" },
+  { icon: Settings, label: "Settings", path: "/dashboard/settings", section: "config" },
+  { icon: CreditCard, label: "Billing", path: "/dashboard/billing", section: "config" },
+  { icon: Users, label: "Team", path: "/dashboard/team", section: "config" },
 ];
 
 const DashboardLayout = () => {

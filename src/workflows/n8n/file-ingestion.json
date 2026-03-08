@@ -1,0 +1,257 @@
+{
+    "name": "ShopMind AI — File Ingestion Pipeline",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "file-ingestion",
+                "responseMode": "lastNode",
+                "options": {}
+            },
+            "name": "Webhook — File Ingestion",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                250,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE knowledge_documents SET status = 'extracting' WHERE id = '{{ $json.body.document_id }}' RETURNING id, store_id, file_name, file_type, storage_path, doc_type;",
+                "options": {}
+            },
+            "name": "Update Status — Extracting",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2,
+            "position": [
+                470,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "method": "GET",
+                "url": "={{ $env.SUPABASE_URL }}/storage/v1/object/authenticated/documents/{{ $json.storage_path }}",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "options": {
+                    "response": {
+                        "response": {
+                            "responseFormat": "file"
+                        }
+                    }
+                }
+            },
+            "name": "Download File from Storage",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                690,
+                300
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "SUPABASE_SERVICE_KEY_CREDENTIAL",
+                    "name": "Supabase Service Key"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract text from file (simplified — use dedicated extractors per type)\nconst binaryData = $input.first().binary;\nconst fileType = $('Update Status — Extracting').first().json.file_type;\nlet text = '';\n\n// For TXT and CSV, read binary directly\nif (['txt', 'csv'].includes(fileType)) {\n  text = Buffer.from(binaryData.data.data, 'base64').toString('utf-8');\n} else {\n  // For PDF/DOCX, integrate a dedicated extraction service\n  text = '[EXTRACTION_NEEDED: Use a PDF/DOCX parsing service]';\n}\n\nreturn [{ json: { text, document_id: $('Update Status — Extracting').first().json.id, store_id: $('Update Status — Extracting').first().json.store_id, doc_type: $('Update Status — Extracting').first().json.doc_type || 'general' } }];"
+            },
+            "name": "Extract Text",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                910,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Chunk text with overlap\nconst text = $json.text;\nconst CHUNK_SIZE = 400;\nconst OVERLAP = 80;\nconst chunks = [];\n\nlet start = 0;\nlet index = 0;\nwhile (start < text.length) {\n  const end = Math.min(start + CHUNK_SIZE, text.length);\n  chunks.push({\n    content: text.slice(start, end),\n    chunk_index: index,\n    document_id: $json.document_id,\n    store_id: $json.store_id,\n    metadata: { doc_type: $json.doc_type, chunk_index: index }\n  });\n  index++;\n  start = end - OVERLAP;\n  if (start >= text.length) break;\n}\n\nreturn chunks.map(c => ({ json: c }));"
+            },
+            "name": "Chunk Text",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1130,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.openai.com/v1/embeddings",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": true,
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "model",
+                            "value": "text-embedding-3-small"
+                        },
+                        {
+                            "name": "input",
+                            "value": "={{ $json.content }}"
+                        }
+                    ]
+                },
+                "options": {},
+                "batching": {
+                    "batch": {
+                        "batchSize": 20,
+                        "batchInterval": 1000
+                    }
+                }
+            },
+            "name": "Generate Embeddings",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1350,
+                300
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "OPENAI_CREDENTIAL_ID",
+                    "name": "OpenAI API Key"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "insert",
+                "schema": "public",
+                "table": "knowledge_chunks",
+                "columns": "store_id,document_id,chunk_index,content,embedding,metadata,embedding_status",
+                "options": {}
+            },
+            "name": "Store Chunks in DB",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2,
+            "position": [
+                1570,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase DB"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE knowledge_documents SET status = 'complete', chunk_count = (SELECT COUNT(*) FROM knowledge_chunks WHERE document_id = '{{ $json.document_id }}'), progress = 100 WHERE id = '{{ $json.document_id }}';",
+                "options": {}
+            },
+            "name": "Update Status — Complete",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2,
+            "position": [
+                1790,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "SUPABASE_DB_CREDENTIAL_ID",
+                    "name": "Supabase DB"
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Webhook — File Ingestion": {
+            "main": [
+                [
+                    {
+                        "node": "Update Status — Extracting",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Status — Extracting": {
+            "main": [
+                [
+                    {
+                        "node": "Download File from Storage",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Download File from Storage": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Text": {
+            "main": [
+                [
+                    {
+                        "node": "Chunk Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Chunk Text": {
+            "main": [
+                [
+                    {
+                        "node": "Generate Embeddings",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Generate Embeddings": {
+            "main": [
+                [
+                    {
+                        "node": "Store Chunks in DB",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Chunks in DB": {
+            "main": [
+                [
+                    {
+                        "node": "Update Status — Complete",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}

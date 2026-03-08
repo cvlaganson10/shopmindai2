@@ -15,6 +15,10 @@ import ConversationsPage from "./pages/ConversationsPage";
 import ProductsPage from "./pages/ProductsPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import SettingsPage from "./pages/SettingsPage";
+import KnowledgeBasePage from "./pages/KnowledgeBasePage";
+import BillingPage from "./pages/BillingPage";
+import AgentSettingsPage from "./pages/AgentSettingsPage";
+import TeamPage from "./pages/TeamPage";
 import ChatWidget from "./pages/ChatWidget";
 import VoiceAssistant from "./pages/VoiceAssistant";
 import NotFound from "./pages/NotFound";
@@ -48,6 +52,10 @@ const App = () => (
               <Route path="products" element={<ProductsPage />} />
               <Route path="analytics" element={<AnalyticsPage />} />
               <Route path="settings" element={<SettingsPage />} />
+              <Route path="knowledge-base" element={<KnowledgeBasePage />} />
+              <Route path="billing" element={<BillingPage />} />
+              <Route path="agent-settings" element={<AgentSettingsPage />} />
+              <Route path="team" element={<TeamPage />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

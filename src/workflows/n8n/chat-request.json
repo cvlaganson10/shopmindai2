@@ -1,0 +1,132 @@
+{
+  "name": "ShopMind AI — Chat Request Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-request",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook — Chat Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sanitize and validate input\nconst input = $input.first().json.body;\nconst store_id = input.store_id;\nconst session_id = input.session_id;\nconst message = (input.message || '').trim().slice(0, 2000);\nconst conversation_id = input.conversation_id || null;\nconst conversation_history = input.conversation_history || [];\n\nif (!store_id || !message) {\n  throw new Error('Missing required fields: store_id, message');\n}\n\nreturn [{ json: { store_id, session_id, message, conversation_id, conversation_history } }];"
+      },
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "text-embedding-3-small" },
+            { "name": "input", "value": "={{ $json.message }}" }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Generate Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [690, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "OPENAI_CREDENTIAL_ID", "name": "OpenAI API Key" }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, content, metadata, 1 - (embedding <=> $1::vector) AS similarity FROM knowledge_chunks WHERE store_id = $2 AND is_active = TRUE AND 1 - (embedding <=> $1::vector) > 0.70 ORDER BY embedding <=> $1::vector LIMIT 6;",
+        "options": {}
+      },
+      "name": "Vector Search — RAG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": { "id": "SUPABASE_DB_CREDENTIAL_ID", "name": "Supabase DB" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble context from retrieved chunks\nconst chunks = $input.first().json;\nconst ragContext = Array.isArray(chunks) && chunks.length > 0\n  ? chunks.map((c, i) => `Source ${i+1}: ${c.content}`).join('\\n\\n')\n  : '[NO RELEVANT CONTEXT FOUND]';\n\nreturn [{ json: { ...($('Validate Input').first().json), rag_context: ragContext, chunk_ids: (chunks || []).map(c => c.id) } }];"
+      },
+      "name": "Assemble Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "content": "You are a helpful AI shopping assistant. Use the provided context to answer questions.\n\n{{ $json.rag_context }}"
+            },
+            {
+              "content": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": { "temperature": 0.4, "maxTokens": 500 }
+      },
+      "name": "GPT-4o Mini — Generate Response",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [1350, 300],
+      "credentials": {
+        "openAiApi": { "id": "OPENAI_CREDENTIAL_ID", "name": "OpenAI API Key" }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "messages",
+        "columns": "conversation_id,store_id,role,content,retrieved_chunk_ids",
+        "options": {}
+      },
+      "name": "Log Messages",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1570, 300],
+      "credentials": {
+        "postgres": { "id": "SUPABASE_DB_CREDENTIAL_ID", "name": "Supabase DB" }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ message: $json.text || $json.content, conversation_id: $json.conversation_id, chunk_ids: $json.chunk_ids }) }}"
+      },
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "Webhook — Chat Request": { "main": [[ { "node": "Validate Input", "type": "main", "index": 0 } ]] },
+    "Validate Input": { "main": [[ { "node": "Generate Query Embedding", "type": "main", "index": 0 } ]] },
+    "Generate Query Embedding": { "main": [[ { "node": "Vector Search — RAG", "type": "main", "index": 0 } ]] },
+    "Vector Search — RAG": { "main": [[ { "node": "Assemble Context", "type": "main", "index": 0 } ]] },
+    "Assemble Context": { "main": [[ { "node": "GPT-4o Mini — Generate Response", "type": "main", "index": 0 } ]] },
+    "GPT-4o Mini — Generate Response": { "main": [[ { "node": "Log Messages", "type": "main", "index": 0 } ]] },
+    "Log Messages": { "main": [[ { "node": "Respond to Webhook", "type": "main", "index": 0 } ]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
