@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Mic, MicOff, MessageSquare, Phone, PhoneOff } from "lucide-react";
+import { Mic, MicOff, MessageSquare, PhoneOff } from "lucide-react";
 
 type VoiceState = "idle" | "listening" | "processing" | "speaking";
 
@@ -22,6 +22,14 @@ const VoiceAssistant = () => {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const recognitionRef = useRef<any>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Tracks whether the voice call session is active (single-tap continuous mode)
+  const callActiveRef = useRef(false);
+  const storeRef = useRef(store);
+
+  // Keep storeRef in sync so processVoice can access latest store
+  useEffect(() => {
+    storeRef.current = store;
+  }, [store]);
 
   useEffect(() => {
     if (!storeId) return;
@@ -38,11 +46,16 @@ const VoiceAssistant = () => {
       });
   }, [storeId]);
 
-  const startListening = () => {
+  const beginRecognition = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       alert("Voice not supported in this browser. Please use Chrome.");
       return;
+    }
+
+    // Cleanup any previous instance
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch { /* ignore */ }
     }
 
     const recognition = new SpeechRecognition();
@@ -62,7 +75,7 @@ const VoiceAssistant = () => {
       }
       setTranscript(final || interim);
 
-      // Reset silence timer
+      // Reset silence timer — when the user pauses for 1.5s after final text, process it
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = setTimeout(() => {
         if (final.trim()) {
@@ -72,13 +85,23 @@ const VoiceAssistant = () => {
       }, 1500);
     };
 
-    recognition.onerror = () => {
-      setVoiceState("idle");
+    recognition.onerror = (event: any) => {
+      // "aborted" errors happen when we manually stop — ignore them
+      if (event.error === "aborted") return;
+      // For other errors, if call is still active, try to restart
+      if (callActiveRef.current) {
+        setTimeout(() => {
+          if (callActiveRef.current) beginRecognition();
+        }, 500);
+      }
     };
 
     recognition.onend = () => {
-      if (voiceState === "listening") {
-        // Auto-stopped
+      // If the recognition ended unexpectedly while we're in "listening" state
+      // and the call is still active, restart it
+      if (callActiveRef.current) {
+        // Only restart if we're still meant to be listening (not processing/speaking)
+        // processVoice will handle restarting after it's done
       }
     };
 
@@ -86,37 +109,58 @@ const VoiceAssistant = () => {
     recognition.start();
     setVoiceState("listening");
     setTranscript("");
-    setAiResponse("");
-  };
+  }, []);
 
-  const stopListening = () => {
-    recognitionRef.current?.stop();
+  /** Start the continuous voice session — single tap activates ongoing listening */
+  const startCall = useCallback(() => {
+    callActiveRef.current = true;
+    setAiResponse("");
+    beginRecognition();
+  }, [beginRecognition]);
+
+  /** Stop the entire voice session */
+  const endCall = useCallback(() => {
+    callActiveRef.current = false;
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch { /* ignore */ }
+    }
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     setVoiceState("idle");
     setTranscript("");
-  };
+    setAiResponse("");
+    setExchanges([]);
+  }, []);
+
+  /** Toggle the mic — tap once to start, tap again to stop */
+  const toggleMic = useCallback(() => {
+    if (callActiveRef.current) {
+      endCall();
+    } else {
+      startCall();
+    }
+  }, [startCall, endCall]);
 
   const processVoice = async (text: string) => {
     setVoiceState("processing");
-    // Simulate AI response
+    setTranscript("");
+
+    // Simulate AI response (replace with n8n webhook call)
     await new Promise((r) => setTimeout(r, 2000));
-    const response = `Thanks for saying "${text}". I'm ${store?.agent_name || "your AI assistant"}. Connect your n8n voice webhook for real AI responses with voice output.`;
+    const currentStore = storeRef.current;
+    const response = `Thanks for saying "${text}". I'm ${currentStore?.agent_name || "your AI assistant"}. Connect your n8n voice webhook for real AI responses with voice output.`;
     setAiResponse(response);
     setExchanges((prev) => [...prev.slice(-5), { customer: text, assistant: response }]);
     setVoiceState("speaking");
 
     // Simulate speaking duration
     await new Promise((r) => setTimeout(r, 3000));
-    setVoiceState("idle");
-  };
 
-  const endCall = () => {
-    recognitionRef.current?.stop();
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    setVoiceState("idle");
-    setTranscript("");
-    setAiResponse("");
-    setExchanges([]);
+    // CONTINUOUS MODE: Automatically resume listening if call is still active
+    if (callActiveRef.current) {
+      beginRecognition();
+    } else {
+      setVoiceState("idle");
+    }
   };
 
   const orbStyles: Record<VoiceState, string> = {
@@ -127,8 +171,8 @@ const VoiceAssistant = () => {
   };
 
   const statusText: Record<VoiceState, string> = {
-    idle: "Tap to speak",
-    listening: "Listening...",
+    idle: "Tap to start",
+    listening: "Listening — speak anytime...",
     processing: "Thinking...",
     speaking: "Speaking...",
   };
@@ -163,15 +207,14 @@ const VoiceAssistant = () => {
           <p className="text-sm text-muted-foreground">{store?.store_name}</p>
         </div>
 
-        {/* Voice Orb */}
+        {/* Voice Orb — single tap toggles the entire session */}
         <button
-          onClick={voiceState === "idle" ? startListening : voiceState === "listening" ? stopListening : undefined}
+          onClick={toggleMic}
           disabled={voiceState === "processing" || voiceState === "speaking"}
-          className={`h-48 w-48 rounded-full flex items-center justify-center transition-all duration-500 cursor-pointer ${orbStyles[voiceState]} ${
-            voiceState === "listening" ? "ring-4 ring-success/30" : ""
-          }`}
+          className={`h-48 w-48 rounded-full flex items-center justify-center transition-all duration-500 cursor-pointer ${orbStyles[voiceState]} ${voiceState === "listening" ? "ring-4 ring-success/30" : ""
+            }`}
         >
-          {voiceState === "listening" ? (
+          {callActiveRef.current ? (
             <MicOff className="h-12 w-12 text-white" />
           ) : (
             <Mic className="h-12 w-12 text-white" />
@@ -187,7 +230,7 @@ const VoiceAssistant = () => {
         )}
 
         {/* AI Response */}
-        {aiResponse && (voiceState === "speaking" || voiceState === "idle") && (
+        {aiResponse && (voiceState === "speaking" || voiceState === "listening" || voiceState === "idle") && (
           <div className="glass-card rounded-xl p-4 w-full text-center">
             <p className="text-sm text-foreground">{aiResponse}</p>
           </div>
